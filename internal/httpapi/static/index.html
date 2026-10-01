@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Service Map | Access Inventory</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="rail">
+      <a class="brand" href="/" aria-label="Service Map home">
+        <span class="brand-mark">S</span>
+        <span><strong>service map</strong><small>CONFIGURATION DB</small></span>
+      </a>
+      <div class="rail-section-label">INVENTORY</div>
+      <nav class="resource-nav" aria-label="Graph resources">
+        <button class="nav-item active" data-resource="identity"><span class="nav-symbol">ID</span>Identities</button>
+        <button class="nav-item" data-resource="job-code"><span class="nav-symbol">JC</span>Job codes</button>
+        <button class="nav-item" data-resource="birthright"><span class="nav-symbol">BR</span>Birthrights</button>
+        <button class="nav-item" data-resource="role"><span class="nav-symbol">RO</span>Roles</button>
+        <button class="nav-item" data-resource="entitlement"><span class="nav-symbol">EN</span>Entitlements</button>
+        <button class="nav-item" data-resource="relationships"><span class="nav-symbol link-symbol">↗</span>Relationships</button>
+      </nav>
+      <div class="rail-footer">
+        <span class="connection-dot" id="connection-dot"></span>
+        <div><strong id="connection-label">Checking database</strong><small>Neo4j connection</small></div>
+      </div>
+    </aside>
+
+    <div class="content-shell">
+      <header class="topbar">
+        <span>ACCESS GOVERNANCE <span class="crumb-separator">/</span> GRAPH RECORDS</span>
+        <span class="environment-tag">LOCAL WORKSPACE</span>
+      </header>
+
+      <main>
+        <section class="page-heading">
+          <div>
+            <p class="eyebrow" id="resource-kicker">IDENTITY DIRECTORY</p>
+            <h1 id="page-title">Identities</h1>
+            <p class="page-subtitle" id="page-subtitle">People and their assigned job codes.</p>
+          </div>
+          <div class="heading-actions">
+            <button class="button button-quiet" id="refresh-button" type="button" title="Refresh records">Refresh</button>
+            <button class="button button-primary" id="create-button" type="button">Add identity</button>
+          </div>
+        </section>
+
+        <section class="metric-strip" aria-label="Current view totals">
+          <div class="metric"><span class="metric-label">RECORDS</span><strong id="metric-total">—</strong></div>
+          <div class="metric"><span class="metric-label">ACTIVE</span><strong id="metric-active">—</strong></div>
+          <div class="metric"><span class="metric-label">RETIRED</span><strong id="metric-retired">—</strong></div>
+          <div class="metric"><span class="metric-label" id="metric-links-label">DIRECT LINKS</span><strong id="metric-links">—</strong></div>
+        </section>
+
+        <section class="records-section" aria-label="Records">
+          <div class="records-toolbar">
+            <label class="search-box">
+              <span aria-hidden="true">⌕</span>
+              <input id="search-input" type="search" placeholder="Filter this list" autocomplete="off">
+            </label>
+            <label class="relationship-filter hidden" id="relationship-filter-wrap">
+              <span>Relationship</span>
+              <select id="relationship-kind"></select>
+            </label>
+            <label class="retired-toggle"><input id="include-retired" type="checkbox"><span>Include retired</span></label>
+          </div>
+          <div class="table-frame">
+            <table>
+              <thead id="table-head"></thead>
+              <tbody id="table-body"></tbody>
+            </table>
+            <div class="empty-state hidden" id="empty-state">
+              <span class="empty-rule"></span>
+              <strong id="empty-title">No records found</strong>
+              <p id="empty-copy">Create a record or change the current filter.</p>
+            </div>
+          </div>
+          <div class="table-footer"><span id="result-count">Loading records…</span><span>Sorted by identifier</span></div>
+        </section>
+        <div class="toast" id="toast" role="status" aria-live="polite"></div>
+      </main>
+      <footer class="page-footer"><span>SERVICE MAP CMDB</span><span>GRAPH RECORDS · API V1</span></footer>
+    </div>
+  </div>
+
+  <dialog class="editor-dialog" id="editor-dialog">
+    <form id="editor-form" method="dialog">
+      <div class="dialog-heading">
+        <div><p class="eyebrow" id="dialog-kicker">NEW RECORD</p><h2 id="dialog-title">Add identity</h2></div>
+        <button class="close-button" type="button" data-close-dialog aria-label="Close">×</button>
+      </div>
+      <div id="editor-fields"></div>
+      <div class="dialog-actions">
+        <button class="button button-quiet" type="button" data-close-dialog>Cancel</button>
+        <button class="button button-primary" type="submit" id="save-button">Create record</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="editor-dialog compact-dialog" id="retire-dialog">
+    <form id="retire-form" method="dialog">
+      <div class="dialog-heading">
+        <div><p class="eyebrow">LIFECYCLE</p><h2>Retire record?</h2></div>
+        <button class="close-button" type="button" data-close-retire aria-label="Close">×</button>
+      </div>
+      <p class="confirm-copy" id="retire-copy">The record will remain in the CMDB with retired status.</p>
+      <div class="dialog-actions">
+        <button class="button button-quiet" type="button" data-close-retire>Cancel</button>
+        <button class="button button-danger" type="submit">Retire</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>

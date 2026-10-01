@@ -1,0 +1,124 @@
+package httpapi
+
+import (
+	"bytes"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+func TestDashboardServedAtRoot(t *testing.T) {
+	handler := NewHandler(nil)
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET / status = %d, want %d", response.Code, http.StatusOK)
+	}
+	if !strings.Contains(response.Body.String(), "Access GOVERNANCE") && !strings.Contains(response.Body.String(), "service map") {
+		t.Fatalf("dashboard HTML did not render expected shell")
+	}
+}
+
+func TestMetadataEndpoint(t *testing.T) {
+	handler := NewHandler(nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/meta", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET /api/meta status = %d, want %d", response.Code, http.StatusOK)
+	}
+	if !strings.Contains(response.Body.String(), "has-job-code") || !strings.Contains(response.Body.String(), "entitlement") {
+		t.Fatalf("metadata response omitted graph kinds: %s", response.Body.String())
+	}
+}
+
+func TestUnknownNodeKindIsBadRequest(t *testing.T) {
+	handler := NewHandler(nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/nodes/unknown", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("GET unknown node kind status = %d, want %d", response.Code, http.StatusBadRequest)
+	}
+}
+
+func TestRequestLoggingUsesRouteTemplate(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+	handler := NewHandlerWithLogger(nil, logger)
+	request := httptest.NewRequest(http.MethodGet, "/api/nodes/private-person", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("GET invalid node kind status = %d, want %d", response.Code, http.StatusBadRequest)
+	}
+	for _, expected := range []string{"http request", "GET /api/nodes/{kind}", "http.response.status_code", "400"} {
+		if !strings.Contains(output.String(), expected) {
+			t.Errorf("request log %q missing %q", output.String(), expected)
+		}
+	}
+	if strings.Contains(output.String(), "private-person") {
+		t.Fatalf("request log contains raw path value: %s", output.String())
+	}
+}
+
+func TestRequestLoggingIncludesRedactedPostBodyAndRestoresIt(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+	body := `{"id":"e0003","properties":{"department":"Platform Engineering","password":"secret-value","api_key":"key-value"}}`
+	var received string
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestBody, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body in handler: %v", err)
+		}
+		received = string(requestBody)
+		w.WriteHeader(http.StatusCreated)
+	})
+	handler := requestLogging(logger, next)
+	request := httptest.NewRequest(http.MethodPost, "/api/nodes/identity", strings.NewReader(body))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if received != body {
+		t.Fatalf("handler received body %q, want original %q", received, body)
+	}
+	for _, expected := range []string{"Platform Engineering", "[REDACTED]"} {
+		if !strings.Contains(output.String(), expected) {
+			t.Errorf("request log %q does not contain %q", output.String(), expected)
+		}
+	}
+	for _, secret := range []string{"secret-value", "key-value"} {
+		if strings.Contains(output.String(), secret) {
+			t.Errorf("request log leaked %q: %s", secret, output.String())
+		}
+	}
+}
+
+func TestRequestLoggingOmitsOversizedBody(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+	body := `{"value":"` + strings.Repeat("x", maxLoggedRequestBody) + `"}`
+	var received string
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestBody, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body in handler: %v", err)
+		}
+		received = string(requestBody)
+	})
+	handler := requestLogging(logger, next)
+	request := httptest.NewRequest(http.MethodPatch, "/api/nodes/identity/e0003", strings.NewReader(body))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if received != body {
+		t.Fatal("handler did not receive the complete oversized body")
+	}
+	if !strings.Contains(output.String(), "request body exceeds 8192 bytes") || strings.Contains(output.String(), strings.Repeat("x", 32)) {
+		t.Fatalf("oversized request body was not safely omitted: %s", output.String())
+	}
+}
