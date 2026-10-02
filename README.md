@@ -1,11 +1,12 @@
 # servicemap-graph-poc
 
-A Go CLI for managing an identity and access graph in Neo4j. The application layer is separate from the CLI so it can be reused by a future HTTP API.
+A Go application for managing an identity and access graph in Neo4j. The Go API is the backend for the React/Vite dashboard; the CLI remains available for terminal workflows.
 
 ## Requirements
 
 - Go 1.26 or later
 - Neo4j with Bolt connectivity enabled
+- Node.js 20.19+ or 22.12+ with npm (frontend development/build only)
 
 ## Configure the connection
 
@@ -86,13 +87,31 @@ All successful commands print JSON to standard output; errors go to standard err
 
 ## Web dashboard and API
 
-Start the local dashboard after configuring Neo4j:
+For local development, configure Neo4j as above, then run the Go API and Vite in separate PowerShell terminals from the repository root. Vite proxies `/api` requests to the Go server:
 
 ```powershell
 go run . serve
 ```
 
-Open `http://127.0.0.1:8080`. To use a different listen address, pass `--addr` or set `HTTP_ADDR`. The server binds to loopback by default and has no authentication; keep it on a trusted local machine.
+```powershell
+Push-Location web
+npm ci
+npm run dev
+```
+
+Open `http://127.0.0.1:5173`. The Vite dev server proxies API requests to `http://127.0.0.1:8080`.
+
+For production, build the frontend before building Go:
+
+```powershell
+Push-Location web
+npm ci
+npm run build
+Pop-Location
+go build -o cmdb.exe .
+```
+
+Vite writes the built React app to `internal/httpapi/static`, where Go embeds and serves it. Node.js is not needed to run the production Go binary. Start it with `go run . serve` or the built executable, then open `http://127.0.0.1:8080`. To use a different listen address, pass `--addr` or set `HTTP_ADDR`. The server binds to loopback by default and has no authentication; keep it on a trusted local machine.
 
 HTTP requests are logged as JSON to stdout. To also export OpenTelemetry log records over OTLP/HTTP, configure a collector endpoint before starting the server:
 
@@ -111,8 +130,12 @@ GET, PATCH, DELETE /api/nodes/{kind}/{id}
 GET, POST       /api/relationships/{kind}
 GET, PATCH, DELETE /api/relationships/{kind}/{fromId}/{toId}
 GET             /api/meta
+GET             /api/openapi.yaml
+GET             /api/docs
 GET             /api/health
 ```
+
+Open interactive Swagger UI at `http://127.0.0.1:8080/api/docs`; the OpenAPI 3.1 document is served at `/api/openapi.yaml`. Swagger UI assets are hosted locally with the embedded frontend.
 
 `DELETE` marks the node or relationship retired; it never physically deletes it. Add `?includeRetired=true` to list/get requests when you need retired records. A node-list response includes its directly attached supported relationships.
 

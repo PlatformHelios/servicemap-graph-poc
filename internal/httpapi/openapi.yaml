@@ -1,0 +1,443 @@
+openapi: 3.1.0
+info:
+  title: Service Map API
+  version: 1.0.0
+  description: >-
+    API for the Service Map identity and access graph. DELETE operations retire
+    records; they never physically delete nodes or relationships.
+servers:
+  - url: /
+tags:
+  - name: Health
+  - name: Metadata
+  - name: Nodes
+  - name: Relationships
+paths:
+  /api/health:
+    get:
+      tags: [Health]
+      summary: Check API and Neo4j availability
+      operationId: getHealth
+      responses:
+        "200":
+          description: Neo4j is reachable.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    const: ok
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /api/meta:
+    get:
+      tags: [Metadata]
+      summary: Get supported graph kinds and relationship endpoints
+      operationId: getMetadata
+      responses:
+        "200":
+          description: Supported node and relationship types.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Metadata"
+  /api/nodes/{kind}:
+    parameters:
+      - $ref: "#/components/parameters/NodeKind"
+    get:
+      tags: [Nodes]
+      summary: List nodes of a kind
+      operationId: listNodes
+      parameters:
+        - $ref: "#/components/parameters/IncludeRetired"
+      responses:
+        "200":
+          description: Nodes with their directly attached supported relationships.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Node"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/RequestFailed"
+    post:
+      tags: [Nodes]
+      summary: Create a node
+      operationId: createNode
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NodeCreate"
+            example:
+              id: e0001
+              properties:
+                department: Platform Engineering
+      responses:
+        "201":
+          description: Node created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Node"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/RequestFailed"
+  /api/nodes/{kind}/{id}:
+    parameters:
+      - $ref: "#/components/parameters/NodeKind"
+      - name: id
+        in: path
+        required: true
+        description: Stable node identifier. For job-code nodes this is the code.
+        schema:
+          type: string
+    get:
+      tags: [Nodes]
+      summary: Get a node
+      operationId: getNode
+      parameters:
+        - $ref: "#/components/parameters/IncludeRetired"
+      responses:
+        "200":
+          description: Node found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Node"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/RequestFailed"
+    patch:
+      tags: [Nodes]
+      summary: Update node properties
+      operationId: updateNode
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PropertiesUpdate"
+      responses:
+        "200":
+          description: Node updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Node"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/RequestFailed"
+    delete:
+      tags: [Nodes]
+      summary: Retire a node and its directly attached relationships
+      description: Marks the node and its directly connected relationships retired. No records are physically deleted.
+      operationId: retireNode
+      responses:
+        "200":
+          description: Node retired.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Node"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/RequestFailed"
+  /api/relationships/{kind}:
+    parameters:
+      - $ref: "#/components/parameters/RelationshipKind"
+    get:
+      tags: [Relationships]
+      summary: List relationships of a kind
+      operationId: listRelationships
+      parameters:
+        - $ref: "#/components/parameters/IncludeRetired"
+      responses:
+        "200":
+          description: Relationships matching the selected kind.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Relationship"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/RequestFailed"
+    post:
+      tags: [Relationships]
+      summary: Create a relationship
+      operationId: createRelationship
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RelationshipCreate"
+            example:
+              fromId: e0001
+              toId: "0001"
+              properties:
+                source: job-assignment
+      responses:
+        "201":
+          description: Relationship created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Relationship"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/RequestFailed"
+  /api/relationships/{kind}/{fromId}/{toId}:
+    parameters:
+      - $ref: "#/components/parameters/RelationshipKind"
+      - name: fromId
+        in: path
+        required: true
+        description: Identifier of the relationship source node.
+        schema:
+          type: string
+      - name: toId
+        in: path
+        required: true
+        description: Identifier of the relationship target node.
+        schema:
+          type: string
+    get:
+      tags: [Relationships]
+      summary: Get a relationship by kind and endpoints
+      operationId: getRelationship
+      parameters:
+        - $ref: "#/components/parameters/IncludeRetired"
+      responses:
+        "200":
+          description: Relationship found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Relationship"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/RequestFailed"
+    patch:
+      tags: [Relationships]
+      summary: Update relationship properties
+      operationId: updateRelationship
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PropertiesUpdate"
+      responses:
+        "200":
+          description: Relationship updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Relationship"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/RequestFailed"
+    delete:
+      tags: [Relationships]
+      summary: Retire a relationship
+      description: Marks the relationship retired. It is not physically deleted.
+      operationId: retireRelationship
+      responses:
+        "200":
+          description: Relationship retired.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Relationship"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/RequestFailed"
+components:
+  parameters:
+    NodeKind:
+      name: kind
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/NodeKind"
+    RelationshipKind:
+      name: kind
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/RelationshipKind"
+    IncludeRetired:
+      name: includeRetired
+      in: query
+      required: false
+      description: Include records marked retired. Defaults to false.
+      schema:
+        type: boolean
+        default: false
+  schemas:
+    NodeKind:
+      type: string
+      enum: [identity, job-code, birthright, role, entitlement]
+    RelationshipKind:
+      type: string
+      enum: [has-job-code, qualifies-for, grants, includes]
+      description: Canonical lowercase kebab-case relationship names. The API also accepts uppercase underscore aliases.
+    Properties:
+      type: object
+      additionalProperties:
+        oneOf:
+          - type: string
+          - type: number
+          - type: boolean
+    Node:
+      type: object
+      required: [kind, id, status]
+      properties:
+        kind:
+          $ref: "#/components/schemas/NodeKind"
+        id:
+          type: string
+          description: Stable node key; job-code nodes use their code as this value.
+        properties:
+          $ref: "#/components/schemas/Properties"
+        status:
+          $ref: "#/components/schemas/LifecycleStatus"
+        retiredAt:
+          type: string
+          format: date-time
+        relationships:
+          type: array
+          description: Directly attached supported relationships; omitted when empty.
+          items:
+            $ref: "#/components/schemas/Relationship"
+    Relationship:
+      type: object
+      required: [kind, fromId, toId, status]
+      properties:
+        kind:
+          $ref: "#/components/schemas/RelationshipKind"
+        fromId:
+          type: string
+        toId:
+          type: string
+        properties:
+          $ref: "#/components/schemas/Properties"
+        status:
+          $ref: "#/components/schemas/LifecycleStatus"
+        retiredAt:
+          type: string
+          format: date-time
+    LifecycleStatus:
+      type: string
+      enum: [active, retired]
+    NodeCreate:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: string
+          minLength: 1
+        properties:
+          $ref: "#/components/schemas/Properties"
+    PropertiesUpdate:
+      type: object
+      required: [properties]
+      properties:
+        properties:
+          $ref: "#/components/schemas/Properties"
+    RelationshipCreate:
+      type: object
+      required: [fromId, toId]
+      properties:
+        fromId:
+          type: string
+          minLength: 1
+        toId:
+          type: string
+          minLength: 1
+        properties:
+          $ref: "#/components/schemas/Properties"
+    Metadata:
+      type: object
+      required: [nodeKinds, relationships]
+      properties:
+        nodeKinds:
+          type: array
+          items:
+            $ref: "#/components/schemas/NodeKind"
+        relationships:
+          type: array
+          items:
+            type: object
+            required: [kind, from, to]
+            properties:
+              kind:
+                $ref: "#/components/schemas/RelationshipKind"
+              from:
+                $ref: "#/components/schemas/NodeKind"
+              to:
+                $ref: "#/components/schemas/NodeKind"
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+  responses:
+    BadRequest:
+      description: Invalid input or unsupported kind.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: Record was not found or is retired and includeRetired was false.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    RequestFailed:
+      description: Request failed due to a server or database error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    ServiceUnavailable:
+      description: Neo4j is unavailable.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"

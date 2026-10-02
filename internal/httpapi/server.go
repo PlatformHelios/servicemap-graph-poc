@@ -24,7 +24,7 @@ import (
 	"github.com/PlatformHelios/servicemap-graph-poc/internal/telemetry"
 )
 
-//go:embed static/*
+//go:embed openapi.yaml static/*
 var dashboard embed.FS
 
 type handler struct {
@@ -64,6 +64,8 @@ func NewHandlerWithLogger(service *cmdb.Service, logger *slog.Logger) http.Handl
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", api.health)
 	mux.HandleFunc("GET /api/meta", api.metadata)
+	mux.HandleFunc("GET /api/openapi.yaml", api.openapi)
+	mux.HandleFunc("GET /api/docs", api.docs)
 	mux.HandleFunc("GET /api/nodes/{kind}", api.listNodes)
 	mux.HandleFunc("POST /api/nodes/{kind}", api.createNode)
 	mux.HandleFunc("GET /api/nodes/{kind}/{id}", api.getNode)
@@ -81,6 +83,24 @@ func NewHandlerWithLogger(service *cmdb.Service, logger *slog.Logger) http.Handl
 	}
 	mux.Handle("GET /", http.FileServer(http.FS(static)))
 	return securityHeaders(requestLogging(logger, mux))
+}
+
+func (h *handler) openapi(w http.ResponseWriter, _ *http.Request) {
+	spec, err := dashboard.ReadFile("openapi.yaml")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "OpenAPI spec is unavailable")
+		return
+	}
+	w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(spec); err != nil {
+		slog.Default().Error("write OpenAPI spec failed", "error", err)
+	}
+}
+
+func (h *handler) docs(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "/docs.html", http.StatusFound)
 }
 
 func (h *handler) health(w http.ResponseWriter, r *http.Request) {

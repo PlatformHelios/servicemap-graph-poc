@@ -27,6 +27,12 @@ go.work.sum
 # env file
 .env
 
+# Frontend dependencies and caches
+web/node_modules/
+web/.vite/
+web/public/swagger-ui/
+web/*.tsbuildinfo
+
 # Editor/IDE
 # .idea/
 # .vscode/

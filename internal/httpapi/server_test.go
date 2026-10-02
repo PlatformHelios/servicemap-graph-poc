@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -18,8 +19,22 @@ func TestDashboardServedAtRoot(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("GET / status = %d, want %d", response.Code, http.StatusOK)
 	}
-	if !strings.Contains(response.Body.String(), "Access GOVERNANCE") && !strings.Contains(response.Body.String(), "service map") {
-		t.Fatalf("dashboard HTML did not render expected shell")
+	page := response.Body.String()
+	if !strings.Contains(page, `id="root"`) {
+		t.Fatalf("dashboard HTML does not contain the React root")
+	}
+	asset := regexp.MustCompile(`src="/(assets/[^\"]+\.js)"`).FindStringSubmatch(page)
+	if len(asset) != 2 {
+		t.Fatalf("dashboard HTML does not reference a built JavaScript asset: %s", page)
+	}
+	assetRequest := httptest.NewRequest(http.MethodGet, "/"+asset[1], nil)
+	assetResponse := httptest.NewRecorder()
+	handler.ServeHTTP(assetResponse, assetRequest)
+	if assetResponse.Code != http.StatusOK {
+		t.Fatalf("GET /%s status = %d, want %d", asset[1], assetResponse.Code, http.StatusOK)
+	}
+	if !strings.Contains(assetResponse.Header().Get("Content-Type"), "javascript") {
+		t.Fatalf("JavaScript asset content type = %q", assetResponse.Header().Get("Content-Type"))
 	}
 }
 
@@ -33,6 +48,36 @@ func TestMetadataEndpoint(t *testing.T) {
 	}
 	if !strings.Contains(response.Body.String(), "has-job-code") || !strings.Contains(response.Body.String(), "entitlement") {
 		t.Fatalf("metadata response omitted graph kinds: %s", response.Body.String())
+	}
+}
+
+func TestOpenAPISpecEndpoint(t *testing.T) {
+	handler := NewHandler(nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/openapi.yaml", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET /api/openapi.yaml status = %d, want %d", response.Code, http.StatusOK)
+	}
+	if !strings.Contains(response.Body.String(), "openapi: 3.1.0") || !strings.Contains(response.Body.String(), "/api/relationships/{kind}") {
+		t.Fatalf("OpenAPI spec is incomplete")
+	}
+}
+
+func TestSwaggerDocsRoute(t *testing.T) {
+	handler := NewHandler(nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/docs", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusFound || response.Header().Get("Location") != "/docs.html" {
+		t.Fatalf("GET /api/docs response = %d %q", response.Code, response.Header().Get("Location"))
+	}
+
+	docsRequest := httptest.NewRequest(http.MethodGet, "/docs.html", nil)
+	docsResponse := httptest.NewRecorder()
+	handler.ServeHTTP(docsResponse, docsRequest)
+	if docsResponse.Code != http.StatusOK || !strings.Contains(docsResponse.Body.String(), "/swagger-ui/swagger-ui.css") {
+		t.Fatalf("Swagger UI document response = %d", docsResponse.Code)
 	}
 }
 
