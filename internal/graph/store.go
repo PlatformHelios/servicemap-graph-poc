@@ -73,23 +73,67 @@ func (s *Store) EnsureConstraints(ctx context.Context) error {
 			return fmt.Errorf("create uniqueness constraint for %s: %w", kind, err)
 		}
 	}
+	if _, err := s.execute(ctx, true, "CREATE CONSTRAINT cmdb_counter_kind_unique IF NOT EXISTS FOR (counter:CMDBCounter) REQUIRE counter.kind IS UNIQUE", nil); err != nil {
+		return fmt.Errorf("create CMDB counter constraint: %w", err)
+	}
 	return nil
 }
 
-func (s *Store) CreateNode(ctx context.Context, kind cmdb.NodeKind, id string, properties map[string]any) (*cmdb.Node, error) {
+func (s *Store) CreateGeneratedNode(ctx context.Context, kind cmdb.NodeKind, properties map[string]any, ciIDs []string) (*cmdb.Node, error) {
 	label, key, err := cmdb.NodeDefinition(kind)
 	if err != nil {
 		return nil, err
 	}
-	query := fmt.Sprintf("CREATE (node:%s {%s: $id, status: 'active'}) SET node += $properties RETURN node AS node", label, key)
-	records, err := s.execute(ctx, true, query, map[string]any{"id": id, "properties": properties})
+	if !cmdb.RequiresGeneratedID(kind) {
+		return nil, fmt.Errorf("%w: %s IDs cannot be generated", cmdb.ErrInvalid, kind)
+	}
+	prefix, err := cmdb.GeneratedIDPrefix(kind)
 	if err != nil {
-		return nil, fmt.Errorf("create %s: %w", kind, err)
+		return nil, err
+	}
+	if kind != cmdb.Incident && kind != cmdb.Change && kind != cmdb.Event {
+		query := fmt.Sprintf("MERGE (counter:CMDBCounter {kind: $kind}) ON CREATE SET counter.value = 0 SET counter.value = counter.value + 1 WITH $prefix + '-' + right('000000' + toString(counter.value), 6) AS generatedID CREATE (node:%s {%s: generatedID, status: 'active'}) SET node += $properties RETURN node AS node", label, key)
+		params := map[string]any{"kind": kind, "prefix": prefix, "properties": properties}
+		records, err := s.execute(ctx, true, query, params)
+		if err != nil {
+			return nil, fmt.Errorf("create %s with generated ID: %w", kind, err)
+		}
+		if len(records) == 0 {
+			return nil, cmdb.ErrNotFound
+		}
+		return decodeNode(kind, key, records[0])
+	}
+	relationshipType := ""
+	switch kind {
+	case cmdb.Incident:
+		relationshipType = "AFFECTS"
+	case cmdb.Change:
+		relationshipType = "CHANGES"
+	case cmdb.Event:
+		relationshipType = "OBSERVED_ON"
+	}
+	query := fmt.Sprintf("WITH $ciIDs AS ciIDs OPTIONAL MATCH (ci:CI) WHERE ci.id IN ciIDs WITH ciIDs, collect(ci) AS cis WHERE size(cis) = size(ciIDs) AND all(ci IN cis WHERE coalesce(ci.status, 'active') <> 'retired') MERGE (counter:CMDBCounter {kind: $kind}) ON CREATE SET counter.value = 0 SET counter.value = counter.value + 1 WITH $prefix + '-' + right('000000' + toString(counter.value), 6) AS generatedID, cis CREATE (node:%s {%s: generatedID, status: 'active'}) SET node += $properties WITH node, cis FOREACH (ci IN cis | CREATE (node)-[:%s {status: 'active'}]->(ci)) OPTIONAL MATCH (node)-[relationship:%s]->(ci:CI) RETURN node AS node, collect(CASE WHEN relationship IS NULL THEN null ELSE {type: type(relationship), fromId: node.id, toId: ci.id, properties: properties(relationship)} END) AS relationships", label, key, relationshipType, relationshipType)
+	params := map[string]any{"kind": kind, "prefix": prefix, "ciIDs": ciIDs, "properties": properties}
+	records, err := s.execute(ctx, true, query, params)
+	if err != nil {
+		return nil, fmt.Errorf("create %s with generated ID: %w", kind, err)
 	}
 	if len(records) == 0 {
-		return nil, cmdb.ErrNotFound
+		return nil, fmt.Errorf("%w: every linked CI must exist and be active", cmdb.ErrInvalid)
 	}
-	return decodeNode(kind, key, records[0])
+	node, err := decodeNode(kind, "id", records[0])
+	if err != nil {
+		return nil, err
+	}
+	value, ok := records[0].Get("relationships")
+	if !ok {
+		return nil, errors.New("Neo4j result did not contain created CI relationships")
+	}
+	node.Relationships, err = decodeListedRelationships(value)
+	if err != nil {
+		return nil, err
+	}
+	return node, nil
 }
 
 func (s *Store) GetNode(ctx context.Context, kind cmdb.NodeKind, id string, includeRetired bool) (*cmdb.Node, error) {
@@ -113,7 +157,7 @@ func (s *Store) ListNodes(ctx context.Context, kind cmdb.NodeKind, includeRetire
 	if err != nil {
 		return nil, err
 	}
-	query := fmt.Sprintf("MATCH (node:%s) WHERE $includeRetired OR coalesce(node.status, 'active') <> 'retired' OPTIONAL MATCH (node)-[relationship:HAS_JOB_CODE|QUALIFIES_FOR|GRANTS|INCLUDES]-(other) WHERE $includeRetired OR coalesce(relationship.status, 'active') <> 'retired' WITH node, collect(CASE WHEN relationship IS NULL THEN null ELSE {type: type(relationship), fromId: coalesce(startNode(relationship).id, startNode(relationship).code), toId: coalesce(endNode(relationship).id, endNode(relationship).code), properties: properties(relationship)} END) AS relationships RETURN node AS node, relationships ORDER BY node.%s", label, key)
+	query := fmt.Sprintf("MATCH (node:%s) WHERE $includeRetired OR coalesce(node.status, 'active') <> 'retired' OPTIONAL MATCH (node)-[relationship:HAS_JOB_CODE|QUALIFIES_FOR|GRANTS|INCLUDES|AFFECTS|CHANGES|OBSERVED_ON|DEPENDS_ON|HOSTED_ON|USES|USED_BY]-(other) WHERE $includeRetired OR coalesce(relationship.status, 'active') <> 'retired' WITH node, collect(CASE WHEN relationship IS NULL THEN null ELSE {type: type(relationship), fromId: coalesce(startNode(relationship).id, startNode(relationship).code), toId: coalesce(endNode(relationship).id, endNode(relationship).code), properties: properties(relationship)} END) AS relationships RETURN node AS node, relationships ORDER BY node.%s", label, key)
 	records, err := s.execute(ctx, false, query, map[string]any{"includeRetired": includeRetired})
 	if err != nil {
 		return nil, fmt.Errorf("list %s: %w", kind, err)

@@ -11,7 +11,7 @@ var ErrNotFound = errors.New("record not found")
 
 type Store interface {
 	EnsureConstraints(context.Context) error
-	CreateNode(context.Context, NodeKind, string, map[string]any) (*Node, error)
+	CreateGeneratedNode(context.Context, NodeKind, map[string]any, []string) (*Node, error)
 	GetNode(context.Context, NodeKind, string, bool) (*Node, error)
 	ListNodes(context.Context, NodeKind, bool) ([]Node, error)
 	UpdateNode(context.Context, NodeKind, string, map[string]any) (*Node, error)
@@ -35,18 +35,49 @@ func (s *Service) EnsureConstraints(ctx context.Context) error {
 	return s.store.EnsureConstraints(ctx)
 }
 
-func (s *Service) CreateNode(ctx context.Context, kind NodeKind, id string, properties map[string]any) (*Node, error) {
-	if _, ok := nodeSpecs[kind]; !ok {
-		return nil, fmt.Errorf("%w: unsupported node kind %q", ErrInvalid, kind)
-	}
-	if err := validateID(id); err != nil {
-		return nil, err
+func (s *Service) CreateGeneratedNode(ctx context.Context, kind NodeKind, properties map[string]any, ciIDs []string) (*Node, error) {
+	if !RequiresGeneratedID(kind) {
+		return nil, fmt.Errorf("%w: IDs are not generated for %s records", ErrInvalid, kind)
 	}
 	cleanProperties, err := validateProperties(properties)
 	if err != nil {
 		return nil, err
 	}
-	return s.store.CreateNode(ctx, kind, id, cleanProperties)
+	if err := validateCIProperties(kind, cleanProperties, true); err != nil {
+		return nil, err
+	}
+	cleanCIIDs, err := normalizeCIIDs(ciIDs)
+	if err != nil {
+		return nil, err
+	}
+	if len(cleanCIIDs) > 0 && kind != Incident && kind != Change && kind != Event {
+		return nil, fmt.Errorf("%w: ciIds are only valid when creating incident, change, or event records", ErrInvalid)
+	}
+	if RequiresLinkedCIs(kind) && len(cleanCIIDs) == 0 {
+		return nil, fmt.Errorf("%w: %s records must be linked to at least one CI", ErrInvalid, kind)
+	}
+	return s.store.CreateGeneratedNode(ctx, kind, cleanProperties, cleanCIIDs)
+}
+
+func RequiresLinkedCIs(kind NodeKind) bool {
+	return kind == Incident || kind == Change
+}
+
+func normalizeCIIDs(ciIDs []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(ciIDs))
+	clean := make([]string, 0, len(ciIDs))
+	for _, id := range ciIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return nil, fmt.Errorf("%w: CI identifiers cannot be empty", ErrInvalid)
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		clean = append(clean, id)
+	}
+	return clean, nil
 }
 
 func (s *Service) GetNode(ctx context.Context, kind NodeKind, id string, includeRetired bool) (*Node, error) {
@@ -77,10 +108,39 @@ func (s *Service) UpdateNode(ctx context.Context, kind NodeKind, id string, prop
 	if err != nil {
 		return nil, err
 	}
+	if err := validateCIProperties(kind, cleanProperties, false); err != nil {
+		return nil, err
+	}
 	if len(cleanProperties) == 0 {
 		return nil, fmt.Errorf("%w: at least one property is required for update", ErrInvalid)
 	}
 	return s.store.UpdateNode(ctx, kind, id, cleanProperties)
+}
+
+func validateCIProperties(kind NodeKind, properties map[string]any, requireCIType bool) error {
+	value, hasCIType := properties["ciType"]
+	if kind != CI {
+		if hasCIType {
+			return fmt.Errorf("%w: ciType is only valid for CI records", ErrInvalid)
+		}
+		return nil
+	}
+	if !hasCIType {
+		if requireCIType {
+			return fmt.Errorf("%w: CI records require a ciType", ErrInvalid)
+		}
+		return nil
+	}
+	typeName, ok := value.(string)
+	if !ok {
+		return fmt.Errorf("%w: ciType must be a string", ErrInvalid)
+	}
+	ciType, err := ParseCIType(typeName)
+	if err != nil {
+		return err
+	}
+	properties["ciType"] = string(ciType)
+	return nil
 }
 
 func (s *Service) RetireNode(ctx context.Context, kind NodeKind, id string) (*Node, error) {

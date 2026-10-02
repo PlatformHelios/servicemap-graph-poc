@@ -32,8 +32,9 @@ type handler struct {
 }
 
 type nodeRequest struct {
-	ID         string         `json:"id"`
+	ID         string         `json:"id,omitempty"`
 	Properties map[string]any `json:"properties"`
+	CIIDs      []string       `json:"ciIds,omitempty"`
 }
 
 type propertiesRequest struct {
@@ -121,7 +122,7 @@ func (h *handler) metadata(w http.ResponseWriter, _ *http.Request) {
 		}
 		relationships = append(relationships, relationshipMetadata{Kind: string(kind), From: definition.From, To: definition.To})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"nodeKinds": cmdb.NodeKinds(), "relationships": relationships})
+	writeJSON(w, http.StatusOK, map[string]any{"nodeKinds": cmdb.NodeKinds(), "ciTypes": cmdb.CITypeNames(), "relationships": relationships})
 }
 
 func (h *handler) listNodes(w http.ResponseWriter, r *http.Request) {
@@ -154,7 +155,11 @@ func (h *handler) createNode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	node, err := h.service.CreateNode(r.Context(), kind, request.ID, request.Properties)
+	if strings.TrimSpace(request.ID) != "" {
+		writeError(w, http.StatusBadRequest, "id is assigned automatically for all node records")
+		return
+	}
+	node, err := h.service.CreateGeneratedNode(r.Context(), kind, request.Properties, request.CIIDs)
 	if err != nil {
 		writeServiceError(w, err)
 		return

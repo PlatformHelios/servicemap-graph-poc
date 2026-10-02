@@ -46,7 +46,7 @@ func TestMetadataEndpoint(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("GET /api/meta status = %d, want %d", response.Code, http.StatusOK)
 	}
-	if !strings.Contains(response.Body.String(), "has-job-code") || !strings.Contains(response.Body.String(), "entitlement") {
+	if !strings.Contains(response.Body.String(), "has-job-code") || !strings.Contains(response.Body.String(), "entitlement") || !strings.Contains(response.Body.String(), "data-connector") || !strings.Contains(response.Body.String(), "application") || !strings.Contains(response.Body.String(), "incident") || !strings.Contains(response.Body.String(), "depends-on") {
 		t.Fatalf("metadata response omitted graph kinds: %s", response.Body.String())
 	}
 }
@@ -59,7 +59,7 @@ func TestOpenAPISpecEndpoint(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("GET /api/openapi.yaml status = %d, want %d", response.Code, http.StatusOK)
 	}
-	if !strings.Contains(response.Body.String(), "openapi: 3.1.0") || !strings.Contains(response.Body.String(), "/api/relationships/{kind}") {
+	if !strings.Contains(response.Body.String(), "openapi: 3.1.0") || !strings.Contains(response.Body.String(), "/api/relationships/{kind}") || !strings.Contains(response.Body.String(), "enum: [server, printer, data-connector, application]") || !strings.Contains(response.Body.String(), "depends-on") {
 		t.Fatalf("OpenAPI spec is incomplete")
 	}
 }
@@ -88,6 +88,37 @@ func TestUnknownNodeKindIsBadRequest(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("GET unknown node kind status = %d, want %d", response.Code, http.StatusBadRequest)
+	}
+}
+
+func TestCreateIncidentRequiresCIIDs(t *testing.T) {
+	handler := NewHandler(nil)
+	request := httptest.NewRequest(http.MethodPost, "/api/nodes/incident", strings.NewReader(`{"properties":{"name":"Unavailable"}}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "at least one CI") {
+		t.Fatalf("POST incident without CI response = %d %s", response.Code, response.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodPost, "/api/nodes/incident", strings.NewReader(`{"id":"INC-1001","ciIds":["ci-1"]}`))
+	request.Header.Set("Content-Type", "application/json")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "assigned automatically") {
+		t.Fatalf("POST incident with caller-supplied ID response = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestCreateNodesRejectCallerSuppliedID(t *testing.T) {
+	handler := NewHandler(nil)
+	for _, kind := range []string{"identity", "job-code", "birthright", "role", "entitlement", "ci", "incident", "change", "event"} {
+		request := httptest.NewRequest(http.MethodPost, "/api/nodes/"+kind, strings.NewReader(`{"id":"custom-id","properties":{"ciType":"server"}}`))
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "assigned automatically") {
+			t.Errorf("POST %s with caller-supplied ID response = %d %s", kind, response.Code, response.Body.String())
+		}
 	}
 }
 

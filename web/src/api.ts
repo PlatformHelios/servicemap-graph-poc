@@ -8,8 +8,8 @@ import type {
 } from "./types";
 
 interface NodeCreate {
-  id: string;
   properties: Properties;
+  ciIds?: string[];
 }
 
 interface RelationshipCreate {

@@ -1,6 +1,8 @@
-export type NodeKind = "identity" | "job-code" | "birthright" | "role" | "entitlement";
+export type NodeKind = "identity" | "job-code" | "birthright" | "role" | "entitlement" | "ci" | "incident" | "change" | "event";
 
-export type RelationshipKind = "has-job-code" | "qualifies-for" | "grants" | "includes";
+export type CIType = "server" | "printer" | "data-connector" | "application";
+
+export type RelationshipKind = "has-job-code" | "qualifies-for" | "grants" | "includes" | "affects" | "changes" | "observed-on" | "depends-on" | "hosted-on" | "uses" | "used-by";
 
 export type PropertyValue = string | number | boolean;
 
@@ -32,10 +34,11 @@ export interface RelationshipDefinition {
 
 export interface Metadata {
   nodeKinds: NodeKind[];
+  ciTypes: CIType[];
   relationships: RelationshipDefinition[];
 }
 
-export type Resource = NodeKind | "relationships";
+export type Resource = NodeKind | "relationships" | "map";
 
 export type RecordEditorTarget =
   | { type: "node"; kind: NodeKind; record?: GraphNode }

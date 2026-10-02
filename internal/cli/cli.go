@@ -19,12 +19,14 @@ const usage = `Usage:
   servicemap node <create|get|list|update|retire> --kind <kind> [options]
   servicemap relationship <create|get|list|update|retire> --kind <kind> [options]
 
-Node kinds: identity, job-code, birthright, role, entitlement
-Relationship kinds: HAS_JOB_CODE, QUALIFIES_FOR, GRANTS, INCLUDES
+Node kinds: identity, job-code, birthright, role, entitlement, ci, incident, change, event
+CI types: server, printer, data-connector, application (fixed enum; add types through a reviewed software release)
+Relationship kinds: HAS_JOB_CODE, QUALIFIES_FOR, GRANTS, INCLUDES, AFFECTS, CHANGES, OBSERVED_ON, DEPENDS_ON, HOSTED_ON, USES, USED_BY
 
 Node options:
-  --id <id>                    Required except for list
+	--id <id>                    Required for get/update/retire; all node IDs are assigned automatically on create
   --properties <json-object>   Properties for create/update
+	--ci-ids <id,id,...>         Required for incident/change; optional for events; invalid for other nodes
   --include-retired            Include retired results for get/list
 
 Relationship options:
@@ -36,7 +38,9 @@ Connection environment:
   NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD, optional NEO4J_DATABASE
 
 Example:
-  servicemap node create --kind identity --id e0001 --properties '{"department":"Platform Engineering"}'
+	servicemap node create --kind identity --properties '{"department":"Platform Engineering"}'
+	servicemap node create --kind ci --properties '{"ciType":"server","name":"app-01"}'
+	servicemap node create --kind incident --ci-ids CI-000001 --properties '{"name":"Application unavailable"}'
 `
 
 type command struct {
@@ -48,6 +52,7 @@ type command struct {
 	fromID         string
 	toID           string
 	properties     map[string]any
+	ciIDs          []string
 	includeRetired bool
 }
 
@@ -111,10 +116,11 @@ func parseCommand(args []string) (command, error) {
 	flags := flag.NewFlagSet(group+" "+operation, flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	kind := flags.String("kind", "", "node or relationship kind")
-	id := flags.String("id", "", "node identifier")
+	id := flags.String("id", "", "node identifier for get/update/retire; assigned automatically on create")
 	fromID := flags.String("from-id", "", "relationship source identifier")
 	toID := flags.String("to-id", "", "relationship target identifier")
 	propertiesJSON := flags.String("properties", "{}", "JSON object of properties")
+	ciIDs := flags.String("ci-ids", "", "comma-separated CI identifiers for incident/change creation")
 	includeRetired := flags.Bool("include-retired", false, "include retired records")
 	if err := flags.Parse(args[2:]); err != nil {
 		return command{}, err
@@ -134,8 +140,25 @@ func parseCommand(args []string) (command, error) {
 		}
 		parsed.nodeKind = parsedKind
 		parsed.id = *id
-		if operation != "list" && strings.TrimSpace(parsed.id) == "" {
+		generatedID := operation == "create" && cmdb.RequiresGeneratedID(parsed.nodeKind)
+		if operation != "list" && !generatedID && strings.TrimSpace(parsed.id) == "" {
 			return command{}, fmt.Errorf("--id is required for node %s", operation)
+		}
+		if generatedID {
+			if strings.TrimSpace(parsed.id) != "" {
+				return command{}, fmt.Errorf("--id is assigned automatically for %s", parsed.nodeKind)
+			}
+			if strings.TrimSpace(*ciIDs) != "" && parsed.nodeKind != cmdb.Incident && parsed.nodeKind != cmdb.Change && parsed.nodeKind != cmdb.Event {
+				return command{}, fmt.Errorf("--ci-ids is only valid when creating incident, change, or event records")
+			}
+			if cmdb.RequiresLinkedCIs(parsed.nodeKind) && strings.TrimSpace(*ciIDs) == "" {
+				return command{}, fmt.Errorf("--ci-ids is required when creating an %s", parsed.nodeKind)
+			}
+			if strings.TrimSpace(*ciIDs) != "" {
+				parsed.ciIDs = strings.Split(*ciIDs, ",")
+			}
+		} else if strings.TrimSpace(*ciIDs) != "" {
+			return command{}, fmt.Errorf("--ci-ids is only valid when creating an incident, change, or event")
 		}
 	} else {
 		parsedKind, err := cmdb.ParseRelationshipKind(*kind)
@@ -179,7 +202,7 @@ func execute(ctx context.Context, service *cmdb.Service, parsed command) (any, e
 	if parsed.group == "node" {
 		switch parsed.operation {
 		case "create":
-			return service.CreateNode(ctx, parsed.nodeKind, parsed.id, parsed.properties)
+			return service.CreateGeneratedNode(ctx, parsed.nodeKind, parsed.properties, parsed.ciIDs)
 		case "get":
 			return service.GetNode(ctx, parsed.nodeKind, parsed.id, parsed.includeRetired)
 		case "list":

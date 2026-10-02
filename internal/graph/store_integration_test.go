@@ -2,8 +2,10 @@ package graph
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,24 +33,17 @@ func TestRetireNodeRetiresOnlyIncidentRelationships(t *testing.T) {
 	}
 
 	service := cmdb.NewService(store)
-	suffix := fmt.Sprintf("retire-test-%d", time.Now().UnixNano())
-	identityID := "identity-" + suffix
-	jobCodeID := "job-" + suffix
-	birthrightID := "birthright-" + suffix
-	roleID := "role-" + suffix
-
-	if _, err := service.CreateNode(ctx, cmdb.Identity, identityID, nil); err != nil {
-		t.Fatal(err)
+	createNode := func(kind cmdb.NodeKind) string {
+		node, err := service.CreateGeneratedNode(ctx, kind, nil, nil)
+		if err != nil {
+			t.Fatalf("create %s: %v", kind, err)
+		}
+		return node.ID
 	}
-	if _, err := service.CreateNode(ctx, cmdb.JobCode, jobCodeID, nil); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := service.CreateNode(ctx, cmdb.Birthright, birthrightID, nil); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := service.CreateNode(ctx, cmdb.Role, roleID, nil); err != nil {
-		t.Fatal(err)
-	}
+	identityID := createNode(cmdb.Identity)
+	jobCodeID := createNode(cmdb.JobCode)
+	birthrightID := createNode(cmdb.Birthright)
+	roleID := createNode(cmdb.Role)
 	if _, err := service.CreateRelationship(ctx, cmdb.HasJobCode, identityID, jobCodeID, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -140,5 +135,61 @@ func TestRetireNodeRetiresOnlyIncidentRelationships(t *testing.T) {
 		if node.Status != "active" {
 			t.Errorf("%s node status = %q, want active", check.kind, node.Status)
 		}
+	}
+}
+
+func TestCreateIncidentWithCIsIsAtomic(t *testing.T) {
+	uri := os.Getenv("NEO4J_URI")
+	database := os.Getenv("NEO4J_TEST_DATABASE")
+	username := os.Getenv("NEO4J_USERNAME")
+	password := os.Getenv("NEO4J_PASSWORD")
+	if uri == "" || database == "" || username == "" || password == "" {
+		t.Skip("set NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD, and NEO4J_TEST_DATABASE to run Neo4j integration tests")
+	}
+
+	ctx := context.Background()
+	store, err := Open(ctx, config.Config{URI: uri, Username: username, Password: password, Database: database})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close(ctx) })
+	if err := store.EnsureConstraints(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	service := cmdb.NewService(store)
+	suffix := fmt.Sprintf("cmdb-create-test-%d", time.Now().UnixNano())
+	ci, err := service.CreateGeneratedNode(ctx, cmdb.CI, map[string]any{"ciType": "server", "testRun": suffix}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ciID := ci.ID
+	if !strings.HasPrefix(ciID, "CI-") {
+		t.Fatalf("generated CI ID = %q, want CI- prefix", ciID)
+	}
+	incident, err := service.CreateGeneratedNode(ctx, cmdb.Incident, map[string]any{"name": "Test incident"}, []string{ciID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(incident.ID, "INC-") {
+		t.Fatalf("generated incident ID = %q, want INC- prefix", incident.ID)
+	}
+	if len(incident.Relationships) != 1 || incident.Relationships[0].Kind != cmdb.Affects || incident.Relationships[0].ToID != ciID {
+		t.Fatalf("created incident relationships = %#v, want one AFFECTS link to %s", incident.Relationships, ciID)
+	}
+
+	incidentsBefore, err := service.ListNodes(ctx, cmdb.Incident, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.CreateGeneratedNode(ctx, cmdb.Incident, nil, []string{"missing-" + suffix}); !errors.Is(err, cmdb.ErrInvalid) {
+		t.Fatalf("create incident with missing CI error = %v, want ErrInvalid", err)
+	}
+	incidentsAfter, err := service.ListNodes(ctx, cmdb.Incident, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(incidentsAfter) != len(incidentsBefore) {
+		t.Fatalf("missing-CI create left an incident behind: counts before=%d after=%d", len(incidentsBefore), len(incidentsAfter))
 	}
 }
