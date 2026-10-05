@@ -1,7 +1,8 @@
 # Local environment for servicemap-graph-poc.
 #
-#   podman compose up -d                          prerequisites only; run the apps on the host
-#   podman compose --profile app up -d --build    prerequisites plus the api and web containers
+#   podman compose up -d --build     everything, including the api and web containers
+#   podman compose up -d neo4j otel-collector loki prometheus grafana kafka
+#                                    prerequisites only, to run the apps on the host
 #
 # (docker compose works the same way.) Containers reach each other by service
 # name (neo4j:7687, otel-collector:4318, kafka:19092), not localhost.
@@ -9,7 +10,6 @@ name: servicemap
 
 services:
   api:
-    profiles: [app]
     build: .
     image: localhost/servicemap-api:dev
     environment:
@@ -28,7 +28,6 @@ services:
     restart: unless-stopped
 
   web:
-    profiles: [app]
     build: ./web
     image: localhost/servicemap-web:dev
     environment:

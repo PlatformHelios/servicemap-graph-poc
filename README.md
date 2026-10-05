@@ -2,7 +2,62 @@
 
 A Go application for managing identity/access and CMDB records in Neo4j. The Go API is the backend for a React/Vite dashboard; a CLI is also available for terminal workflows.
 
-- [Requirements](#requirements)
+## Quick start
+
+Run every command from the repository root. Examples use Podman; with Docker, replace `podman` with `docker`.
+
+### 1. Install the prerequisites
+
+- [Podman](https://podman.io/docs/installation) with Compose (`podman compose version`), or [Docker](https://docs.docker.com/get-docker/) with Compose v2
+- Free host ports 3000, 3100, 4317, 4318, 7474, 7687, 8080, 8081, 9090, and 9092. Stop any standalone Neo4j, OpenTelemetry collector, Loki, Grafana, Prometheus, or Kafka containers that already use them.
+- Only for [developing on the host](#develop-on-the-host): Go 1.26 or later, and Node.js 20.19+ or 22.12+ with npm
+
+### 2. Set environment variables
+
+Compose reads `.env` from the repository root. It is optional; without it the defaults below apply.
+
+```powershell
+Copy-Item .env.example .env
+```
+
+| Variable | Default | Used for |
+| --- | --- | --- |
+| `NEO4J_PASSWORD` | `your_password` | Neo4j's initial password and the API's connection. At least 8 characters. Set it before the first start: Neo4j keeps the password it was created with until its volume is deleted. |
+
+The API container's other settings (Neo4j URI, OTLP endpoint, listen address) are preset in `compose.yaml`; see [Configuration](#configuration) for everything the API reads.
+
+### 3. Build the images
+
+```powershell
+podman compose build
+```
+
+This builds `api` (the Go API with the dashboard embedded) and `web` (the dashboard on nginx). The first build takes a few minutes.
+
+### 4. Start the environment
+
+```powershell
+podman compose up -d
+podman compose ps
+```
+
+The `api` container waits for Neo4j to report healthy (up to about two minutes on a first start) and applies the database schema itself; no separate `init` step is needed.
+
+### 5. Open it
+
+| What | URL |
+| --- | --- |
+| Dashboard | http://127.0.0.1:8080 |
+| Swagger UI | http://127.0.0.1:8080/api/docs |
+| Grafana (API logs under the Loki data source) | http://localhost:3000 |
+| Neo4j Browser (user `neo4j`, password from step 2) | http://localhost:7474 |
+
+Stop with `podman compose down`; add `-v` to also delete the data. After code changes, rebuild and restart with `podman compose up -d --build`.
+
+To work on the code with live reload, run only the prerequisites in containers and the apps on the host; see [Develop on the host](#develop-on-the-host).
+
+## Contents
+
 - [Getting started](#getting-started)
 - [Configuration](#configuration)
 - [Web dashboard](#web-dashboard)
@@ -12,28 +67,20 @@ A Go application for managing identity/access and CMDB records in Neo4j. The Go 
 - [Catalog requests and workflows](#catalog-requests-and-workflows)
 - [Tests](#tests)
 
-## Requirements
-
-- Podman or Docker with Compose
-- For running the apps on the host: Go 1.26 or later, and Node.js 20.19+ or 22.12+ with npm
-
 ## Getting started
 
-There are two ways to run the environment:
+By default everything runs in containers. To work on the code with live reload, [develop on the host](#develop-on-the-host) instead.
 
-- **Everything in containers** -- quickest; see [Run in containers](#run-in-containers).
-- **Apps on the host** -- for development with live reload; follow steps 1-3 below.
-
-### 1. Start the prerequisites
-
-`compose.yaml` brings up every dependency. The Go API and the React dev server run on the host.
+### Run in containers
 
 ```powershell
-podman compose up -d      # or: docker compose up -d
+podman compose up -d --build      # or: docker compose up -d --build
 ```
 
 | Service | Host port | Purpose |
 | --- | --- | --- |
+| `api` | 127.0.0.1:8080 | Go API with the dashboard embedded, plus Swagger UI at `/api/docs` (`Dockerfile`). Waits for Neo4j, applies the schema on startup, and exports logs to the collector. |
+| `web` | 127.0.0.1:8081 | Standalone dashboard served by nginx, proxying `/api` to the `api` service (`web/Dockerfile`). Can be deployed and scaled separately from the API. |
 | `neo4j` | 7474 (browser), 7687 (Bolt) | Graph store. Password is `NEO4J_PASSWORD` from `.env` (see `.env.example`), default `your_password`. |
 | `otel-collector` | 4317 (gRPC), 4318 (HTTP) | Receives OTLP from the API and forwards logs to Loki (`deploy/otel-collector.yaml`). |
 | `loki` | 3100 | Log store, 24h retention (`deploy/loki.yaml`). |
@@ -41,9 +88,35 @@ podman compose up -d      # or: docker compose up -d
 | `grafana` | 3000 | Anonymous admin, with Loki and Prometheus data sources provisioned. |
 | `kafka` | 9092 | Single-node KRaft broker. Containers on the compose network use `kafka:19092`. |
 
-Data lives in named volumes; `podman compose down -v` removes it.
+- **Rebuild after code changes:** run `podman compose up -d --build` again (or `podman compose up -d --build api web` for just the apps).
+- **Stop:** `podman compose down`. Data lives in named volumes; add `-v` to delete it.
+- **Logs:** `podman compose logs -f api`, or in Grafana under the Loki data source as `{service_name="servicemap-graph-poc"}`.
+- **CLI:** the API image's entrypoint is the binary, so CLI commands run against the stack with `podman compose exec api /servicemap node list --kind identity`.
 
-### 2. Run the API
+#### Building images directly
+
+```powershell
+podman build -t servicemap-api .         # context is the repo root
+podman build -t servicemap-web web       # context is web/
+```
+
+The API image is a multi-stage build: it builds the dashboard with Node, embeds the output in the Go binary, and runs it on `distroless/static` as a non-root user, with `serve` as the default command. The web image listens on port 8080 and proxies `/api` to `API_UPSTREAM` (default `http://api:8080`). For example, against an API running on the host (Docker uses `host.docker.internal`):
+
+```powershell
+podman run --rm -p 8081:8080 -e API_UPSTREAM=http://host.containers.internal:8080 servicemap-web
+```
+
+### Develop on the host
+
+Run the prerequisites in containers and the Go API and Vite dev server on the host. If the `api` container is running, stop it first with `podman compose stop api web`, since both use port 8080.
+
+#### 1. Start the prerequisites
+
+```powershell
+podman compose up -d neo4j otel-collector loki prometheus grafana kafka
+```
+
+#### 2. Run the API
 
 ```powershell
 $env:NEO4J_URI = "bolt://localhost:7687"
@@ -60,7 +133,7 @@ go run . serve
 
 If `go env GOOS` reports something other than your OS (for example a persisted `go env -w GOOS=linux` for cross-compiling), `go run` and `go test` fail with "not a valid Win32 application". Override it for the terminal with `$env:GOOS = "windows"; $env:GOARCH = "amd64"`, or clear it with `go env -u GOOS GOARCH`.
 
-### 3. Run the dashboard
+#### 3. Run the dashboard
 
 In a second terminal:
 
@@ -70,43 +143,7 @@ npm ci
 npm run dev
 ```
 
-Open `http://127.0.0.1:5173`. Vite proxies `/api` to the Go server at `http://127.0.0.1:8080`. API logs appear in Grafana (`http://localhost:3000`) under the Loki data source as `{service_name="servicemap-graph-poc"}`.
-
-### Run in containers
-
-The `app` profile adds the API and dashboard containers to the stack and builds their images:
-
-```powershell
-podman compose --profile app up -d --build      # or: docker compose --profile app up -d --build
-```
-
-| Service | URL | Image |
-| --- | --- | --- |
-| `api` | `http://127.0.0.1:8080` | `Dockerfile`: the Go API with the dashboard embedded, plus Swagger UI at `/api/docs`. |
-| `web` | `http://127.0.0.1:8081` | `web/Dockerfile`: the dashboard served by nginx, proxying `/api` to the `api` service. |
-
-Both serve the same dashboard. `web` is a standalone frontend that can be deployed and scaled separately from the API. The `api` container waits for Neo4j to be healthy, applies the schema on startup (no separate `init` needed), and exports logs to the collector. Stop the app containers before running the apps on the host, since both use port 8080.
-
-To rebuild after code changes, run the same `up --build` command. To stop everything, run `podman compose --profile app down` (add `-v` to delete data).
-
-#### Building images directly
-
-```powershell
-podman build -t servicemap-api .         # context is the repo root
-podman build -t servicemap-web web       # context is web/
-```
-
-The API image is a multi-stage build: it builds the dashboard with Node, embeds the output in the Go binary, and runs it on `distroless/static` as a non-root user. The binary is the entrypoint and `serve` is the default command, so the CLI works too:
-
-```powershell
-podman run --rm --network servicemap_default -e NEO4J_URI=bolt://neo4j:7687 -e NEO4J_USERNAME=neo4j -e NEO4J_PASSWORD=your_password servicemap-api node list --kind identity
-```
-
-The web image listens on port 8080 and proxies `/api` to `API_UPSTREAM` (default `http://api:8080`), so it needs an API reachable at that address. For example, against an API running on the host (Docker uses `host.docker.internal`):
-
-```powershell
-podman run --rm -p 8081:8080 -e API_UPSTREAM=http://host.containers.internal:8080 servicemap-web
-```
+Open `http://127.0.0.1:5173`. Vite proxies `/api` to the Go server at `http://127.0.0.1:8080`.
 
 ### Production build without containers
 
