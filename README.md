@@ -106,6 +106,20 @@ The API image is a multi-stage build: it builds the dashboard with Node, embeds 
 podman run --rm -p 8081:8080 -e API_UPSTREAM=http://host.containers.internal:8080 servicemap-web
 ```
 
+#### Published images
+
+The [Container images](.github/workflows/images.yml) workflow builds both images on every pull request (without pushing) and pushes them to GitHub Container Registry:
+
+| Image | Tags |
+| --- | --- |
+| `ghcr.io/platformhelios/servicemap-api` | `latest` and `main` from `main`; `1.2.3` and `1.2` from a `v1.2.3` tag; `sha-<short>` for every push |
+| `ghcr.io/platformhelios/servicemap-web` | same as above |
+
+```powershell
+podman login ghcr.io      # GitHub username and a token with read:packages
+podman pull ghcr.io/platformhelios/servicemap-api:latest
+```
+
 ### Develop on the host
 
 Run the prerequisites in containers and the Go API and Vite dev server on the host. If the `api` container is running, stop it first with `podman compose stop api web`, since both use port 8080.
