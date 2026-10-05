@@ -5,7 +5,10 @@ info:
   description: >-
     API for the Service Map identity/access graph and CMDB. CI types are a fixed,
     reviewed enum; new values require a software release. DELETE operations
-    retire records and never physically delete nodes or relationships.
+    retire records and never physically delete nodes or relationships. Until Entra
+    SSO arrives, callers send X-Actor-Id (an identity id, or platform-super-admin /
+    omitted for the development super admin). Anthos platform entitlements held by
+    that identity gate which tools and mutations are allowed.
 servers:
   - url: /
 tags:
@@ -51,12 +54,39 @@ paths:
     get:
       tags: [Nodes]
       summary: List nodes of a kind
+      description: >-
+        Nodes sorted by identifier. Pass limit and offset to read a page; X-Total-Count and X-Active-Count report the
+        matching totals so clients can page without loading everything. q is a server-side case-insensitive search
+        across the node's properties. For requests only, involvedId narrows the list to the requests an identity
+        raised or that are for it, and requestType narrows to one form (vendor or access). Each node carries a sample
+        of its directly attached supported relationships (at most 200 per node); read the node by id for the full set.
       operationId: listNodes
       parameters:
         - $ref: "#/components/parameters/IncludeRetired"
+        - $ref: "#/components/parameters/PageLimit"
+        - $ref: "#/components/parameters/PageOffset"
+        - $ref: "#/components/parameters/SearchQuery"
+        - name: involvedId
+          in: query
+          required: false
+          description: Requests only. Identity id; returns the requests it drafted or submitted, or that are requested for it.
+          schema:
+            type: string
+        - name: requestType
+          in: query
+          required: false
+          description: Requests only. Return requests raised through one form.
+          schema:
+            type: string
+            enum: [vendor, access]
       responses:
         "200":
-          description: Nodes with their directly attached supported relationships.
+          description: Nodes with a bounded sample of their directly attached supported relationships.
+          headers:
+            X-Total-Count:
+              $ref: "#/components/headers/TotalCount"
+            X-Active-Count:
+              $ref: "#/components/headers/ActiveCount"
           content:
             application/json:
               schema:
@@ -168,12 +198,23 @@ paths:
     get:
       tags: [Relationships]
       summary: List relationships of a kind
+      description: >-
+        Relationships sorted by endpoint identifiers. Pass limit and offset to read a page; X-Total-Count and
+        X-Active-Count report the matching totals. q matches either endpoint identifier.
       operationId: listRelationships
       parameters:
         - $ref: "#/components/parameters/IncludeRetired"
+        - $ref: "#/components/parameters/PageLimit"
+        - $ref: "#/components/parameters/PageOffset"
+        - $ref: "#/components/parameters/SearchQuery"
       responses:
         "200":
           description: Relationships matching the selected kind.
+          headers:
+            X-Total-Count:
+              $ref: "#/components/headers/TotalCount"
+            X-Active-Count:
+              $ref: "#/components/headers/ActiveCount"
           content:
             application/json:
               schema:
@@ -287,6 +328,434 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/RequestFailed"
+  /api/workflows:
+    get:
+      tags: [Workflows]
+      summary: List workflow definitions
+      description: Every workflow with its ordered steps and resolved assignees.
+      operationId: listWorkflows
+      parameters:
+        - $ref: "#/components/parameters/IncludeRetired"
+      responses:
+        "200":
+          description: Workflow definitions.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WorkflowDefinition"
+        "500":
+          $ref: "#/components/responses/RequestFailed"
+    post:
+      tags: [Workflows]
+      summary: Create a workflow
+      description: >-
+        Creates a workflow for one catalog form (requestType). Steps are stored in the order given. At most one
+        workflow per form may be enabled; an enabled workflow needs at least one step, and its steps together must
+        require every property the target CI needs that the requester does not supply (vendor: criticality).
+      operationId: createWorkflow
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowDefinition"
+      responses:
+        "201":
+          description: Workflow created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowDefinition"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/RequestFailed"
+  /api/workflows/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [Workflows]
+      summary: Get a workflow
+      operationId: getWorkflow
+      responses:
+        "200":
+          description: Workflow found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowDefinition"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/RequestFailed"
+    put:
+      tags: [Workflows]
+      summary: Replace a workflow definition
+      description: >-
+        Replaces the workflow's name, description, enabled flag, and steps. Steps that carry their id are updated in
+        place so tasks already raised for them keep pointing at a live step; steps without an id are created; steps
+        omitted are retired. Assignments and the next-step chain are rebuilt.
+      operationId: updateWorkflow
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowDefinition"
+      responses:
+        "200":
+          description: Workflow updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowDefinition"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/RequestFailed"
+    delete:
+      tags: [Workflows]
+      summary: Retire a workflow
+      description: Marks the workflow, its steps, and their relationships retired. Runs already in progress are unaffected.
+      operationId: retireWorkflow
+      responses:
+        "200":
+          description: Workflow retired.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowDefinition"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/RequestFailed"
+  /api/tasks:
+    get:
+      tags: [Workflows]
+      summary: List workflow tasks
+      description: >-
+        Tasks raised by workflow runs. Filter by actorId to see the tasks an identity may act on (assigned directly
+        or through a group it is a member of), or by requestId to see a request's progress. Only pending tasks are
+        returned unless includeDone is true. Pass limit and offset to read a page; X-Total-Count reports the
+        matching total.
+      operationId: listTasks
+      parameters:
+        - $ref: "#/components/parameters/PageLimit"
+        - $ref: "#/components/parameters/PageOffset"
+        - name: actorId
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: requestId
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: includeDone
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: Tasks.
+          headers:
+            X-Total-Count:
+              $ref: "#/components/headers/TotalCount"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TaskView"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/RequestFailed"
+  /api/tasks/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [Workflows]
+      summary: Get a task
+      operationId: getTask
+      responses:
+        "200":
+          description: Task found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskView"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/RequestFailed"
+  /api/tasks/{id}/actions:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      tags: [Workflows]
+      summary: Act on a pending task
+      description: >-
+        Records what an eligible actor did. complete finishes a review step; approve satisfies an approval step
+        under its rule (any one approver, or every eligible approver); reject returns the request to its requester
+        as a draft with the comment attached (comment required). Field updates are limited to the step's
+        editableFields and validated like any request edit; completing or approving requires the step's
+        requiredFields. When the last step completes, the request is fulfilled: the CI it describes is created,
+        linked with fulfilled-by, and the request state becomes fulfilled; the request, its run, and every task of
+        the run are then retired (with their attached relationships, except fulfilled-by) so the CI is the live
+        record, all in one write. Retired tasks remain readable through GET /api/tasks?includeDone=true.
+      operationId: actOnTask
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TaskActionInput"
+      responses:
+        "200":
+          description: Action recorded; the task as it now stands.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskView"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/RequestFailed"
+  /api/form-sla:
+    get:
+      tags: [Metadata]
+      summary: SLA for a catalog form
+      description: >-
+        Returns the SLA copied onto requests from the enabled workflow for that
+        form. Catalog form users can read this; they cannot change it.
+      operationId: getFormSLA
+      parameters:
+        - $ref: "#/components/parameters/ActorId"
+        - name: requestType
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [vendor, access]
+      responses:
+        "200":
+          description: Whether the form has an SLA and how many business days it allows.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [requestType, enabled, businessDays]
+                properties:
+                  requestType:
+                    type: string
+                    enum: [vendor, access]
+                  enabled:
+                    type: boolean
+                  businessDays:
+                    type: integer
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/holidays:
+    get:
+      tags: [Metadata]
+      summary: List platform holidays
+      description: Super-admin only. Holidays are closed business days for SLA and OLA counting (Monday–Friday otherwise).
+      operationId: listHolidays
+      parameters:
+        - $ref: "#/components/parameters/ActorId"
+      responses:
+        "200":
+          description: Marked holidays, oldest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Holiday"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    put:
+      tags: [Metadata]
+      summary: Replace platform holidays
+      description: Super-admin only. Replaces the full holiday calendar used when counting SLA and OLA business days.
+      operationId: saveHolidays
+      parameters:
+        - $ref: "#/components/parameters/ActorId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                holidays:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/Holiday"
+      responses:
+        "200":
+          description: Saved holidays.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Holiday"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/capabilities:
+    get:
+      tags: [Access requests]
+      summary: Platform capabilities for the actor
+      description: >-
+        Resolves which Anthos tool capabilities the X-Actor-Id header holds. The platform
+        super admin (platform-super-admin, or a missing header for local CLI tools) receives
+        every capability. An identity receives capabilities from entitlements held through
+        birthrights, included roles, or direct permissions links.
+      operationId: getCapabilities
+      parameters:
+        - $ref: "#/components/parameters/ActorId"
+      responses:
+        "200":
+          description: Actor access profile.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActorAccess"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/access-options:
+    get:
+      tags: [Access requests]
+      summary: What an identity may request
+      description: >-
+        The roles and entitlements an identity may ask for on the Access Request Form, grouped by the application
+        they belong to (has-role for roles, entitled-by for entitlements). Only items with an active Accountable are offered, and anything the
+        identity already holds is left out: roles granted by a birthright its job code qualifies for, entitlements
+        included by any role it holds, roles and entitlements it is permissioned to directly, and items still open
+        on another access request. What was left out, and why, is returned under held.
+      operationId: accessOptions
+      parameters:
+        - $ref: "#/components/parameters/ActorId"
+        - name: identityId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Requestable items grouped by application, with what the identity already holds.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccessOptions"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/RequestFailed"
+  /api/access-anomalies:
+    get:
+      tags: [Access requests]
+      summary: Overlapping access paths
+      description: >-
+        Identities that hold the same role or entitlement through more than one path: a birthright (job code
+        qualifies-for the birthright, which grants the item or a role that includes the entitlement), a held role
+        that includes the entitlement, and/or a direct permissions link. Shown on the Birthrights page so duplicate
+        paths can be cleaned up. The check walks the whole access graph, so it runs on a schedule in the server
+        (ACCESS_ANOMALY_INTERVAL, default 15m) and this endpoint returns the latest snapshot with the time it was
+        computed; computedAt is absent until the first run has completed.
+      operationId: accessAnomalies
+      responses:
+        "200":
+          description: The latest anomaly snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccessAnomalyReport"
+        "500":
+          $ref: "#/components/responses/RequestFailed"
+  /api/access-anomalies/refresh:
+    post:
+      tags: [Access requests]
+      summary: Recompute the anomaly snapshot now
+      description: >-
+        Runs the overlapping-access check immediately and replaces the stored snapshot, returning the new report.
+        Intended for development and operators; the dashboard only shows its Refresh button in development builds.
+      operationId: refreshAccessAnomalies
+      responses:
+        "200":
+          description: The freshly computed snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccessAnomalyReport"
+        "500":
+          $ref: "#/components/responses/RequestFailed"
+  /api/access-requests:
+    post:
+      tags: [Access requests]
+      summary: Raise an access request
+      description: >-
+        Submits the Access Request Form. There is no draft: the request is created in-review with requestType
+        access, linked form-submitted from requestedById and requested-for to requestForId, and each item is
+        recorded as a requests-access link carrying the note and a decision (pending). Every item must be on offer
+        for that identity right now (see GET /api/access-options). The access workflow must be enabled in Workflow
+        Creator (it fixes who fulfils access); a run opens and one approval task is raised per item, assigned to the
+        item's Accountable. Approving an item raises its fulfilment task for the workflow's fulfilment assignees;
+        denying it (comment required) records the denial without returning the request. Completing a fulfilment task
+        creates the permissions link from the role or entitlement to the identity (requestId, grantedAt, grantedBy,
+        note on the edge). The request closes once every item is denied or provisioned: fulfilled when at least one
+        was provisioned, denied when none was; either way the request, run, and tasks are retired.
+      operationId: createAccessRequest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccessRequestInput"
+      responses:
+        "201":
+          description: Request raised; its approval tasks are pending.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Node"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/RequestFailed"
 components:
   parameters:
     NodeKind:
@@ -309,25 +778,668 @@ components:
       schema:
         type: boolean
         default: false
+    PageLimit:
+      name: limit
+      in: query
+      required: false
+      description: Maximum records to return (1–500). When omitted the full list is returned.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 500
+    PageOffset:
+      name: offset
+      in: query
+      required: false
+      description: Records to skip before the first returned record. Defaults to 0.
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+    SearchQuery:
+      name: q
+      in: query
+      required: false
+      description: Case-insensitive text to match; records whose identifier or properties contain it are returned.
+      schema:
+        type: string
+  headers:
+    TotalCount:
+      description: Number of records matching the filters across all pages.
+      schema:
+        type: integer
+    ActiveCount:
+      description: Number of matching records whose status is active.
+      schema:
+        type: integer
+    ActorId:
+      name: X-Actor-Id
+      in: header
+      required: false
+      description: >-
+        Mocked sign-in actor until Entra SSO. Use an identity id to enforce that
+        identity's Anthos entitlements, or platform-super-admin (also the default
+        when omitted) for unrestricted development access.
+      schema:
+        type: string
   schemas:
+    ActorAccess:
+      type: object
+      required: [actorId, superAdmin, entitlements, capabilities]
+      properties:
+        actorId:
+          type: string
+        superAdmin:
+          type: boolean
+        entitlements:
+          type: array
+          items:
+            type: string
+        capabilities:
+          type: array
+          items:
+            type: string
+            description: Action keys such as identity:read or incident:create.
     NodeKind:
       type: string
-      description: Record category. CI records additionally require a ciType property.
-      enum: [identity, job-code, birthright, role, entitlement, ci, incident, change, event]
+      description: >-
+        Record category. CI records additionally require a ciType property. request records are catalog requests:
+        vendor requests require a requestType, start in the draft state, and are tied to
+        their requester with drafted-request until they are submitted (see RequestState); access requests are raised
+        complete through POST /api/access-requests. workflow, workflow-step,
+        workflow-run, and task records are managed through /api/workflows and /api/tasks; they are listed here so
+        they can be read and appear on the map, but cannot be created or updated through /api/nodes. DELETE works
+        for finished runs (retiring the run and its tasks) and acted-on tasks; active runs, pending tasks, and
+        steps are refused.
+      enum: [identity, job-code, birthright, role, entitlement, group, ci, incident, change, event, request, workflow, workflow-step, workflow-run, task]
     CIType:
       type: string
       description: Fixed, reviewed catalog. Additions require a software change and redeployment; runtime type creation is not supported.
-      enum: [server, printer, data-connector, application]
+      enum: [server, printer, data-connector, application, service, process, function, location, contract, vendor]
+    CICategory:
+      type: string
+      description: Business, technology, or security classification. Required when creating service, process, or function CIs.
+      enum: [business, technology, security]
+    ContractType:
+      type: string
+      description: Contract classification. Required when creating contract CIs.
+      enum: [basic-contract, msa, nda]
+    HostingModel:
+      type: string
+      description: Whether an application is hosted internally or externally. Required when creating application CIs.
+      enum: [internal, external]
+    Criticality:
+      type: string
+      description: How important a vendor is to the business. Required when creating vendor CIs.
+      enum: [critical, important, business-support]
+    RequestType:
+      type: string
+      description: >-
+        The catalog form a request was raised from. vendor requests carry the same properties as the vendor CI they
+        describe and are drafted through /api/nodes/request. access requests ask for roles or entitlements an
+        identity does not already hold; they are raised complete through POST /api/access-requests and cannot be
+        created as drafts.
+      enum: [vendor, access]
+    RequestState:
+      type: string
+      description: >-
+        Lifecycle of a catalog request. Requests are created as drafts (incomplete values are allowed) and linked to
+        their requester with drafted-request. Updating state to submitted checks the request carries every property
+        the requester is expected to supply (vendor: name; criticality is decided when the CI is created), records
+        submittedAt, retires the drafted-request link,
+        and creates form-submitted from the same requester in one write. A draft with no active requester cannot be
+        submitted. If the form has an enabled workflow, submission also starts a run and the state becomes in-review;
+        completing the last step creates the CI, sets fulfilled, and retires the request along with its run and
+        tasks (list it with includeRetired=true). A reviewer who rejects a task returns the request
+        to draft with returnComment / returnedAt set. Access requests start in-review and end fulfilled (at least
+        one item provisioned) or denied (every item refused). Callers may only set draft (on create) or submitted;
+        in-review, fulfilled, and denied are set by the workflow, and a request never moves backwards through the API.
+      enum: [draft, submitted, in-review, fulfilled, denied]
+    StepType:
+      type: string
+      description: review steps complete once the assignees have looked the form over (filling in any exposed fields); approval steps need approvals under their rule.
+      enum: [review, approval]
+    ApprovalRule:
+      type: string
+      description: For approval steps with several eligible approvers: the first approval satisfies the step (any), or every eligible approver must approve (all).
+      enum: [any, all]
+    TaskStatus:
+      type: string
+      enum: [pending, completed, approved, rejected]
+    TaskAction:
+      type: string
+      enum: [complete, approve, reject]
+    Assignee:
+      type: object
+      required: [id, kind]
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+          enum: [identity, group]
+        name:
+          type: string
+    WorkflowStepDefinition:
+      type: object
+      required: [name, stepType, assigneeIds]
+      properties:
+        id:
+          type: string
+          description: Assigned by the server. Supply it when updating a workflow to keep the step (and its tasks) rather than replace it.
+        order:
+          type: integer
+          description: Position in the workflow, assigned from the array order on save.
+        name:
+          type: string
+        stepType:
+          $ref: "#/components/schemas/StepType"
+        instructions:
+          type: string
+        approvalRule:
+          $ref: "#/components/schemas/ApprovalRule"
+        editableFields:
+          type: array
+          description: Request fields the assignees may fill in or change at this step (see requestFields in GET /api/meta).
+          items:
+            type: string
+        requiredFields:
+          type: array
+          description: Editable fields that must be present before the step can be completed or approved.
+          items:
+            type: string
+        assigneeIds:
+          type: array
+          description: Identities or groups who act on this step.
+          items:
+            type: string
+        assignees:
+          type: array
+          readOnly: true
+          items:
+            $ref: "#/components/schemas/Assignee"
+        assigneeRule:
+          type: string
+          enum: [item-accountable]
+          description: >-
+            When set, the step's tasks are assigned at run time instead of to assigneeIds (which must then be
+            empty). item-accountable assigns each task to the Accountable of the requested role or entitlement it is
+            about. Only the access request workflow uses it, and its shape is fixed: step 1 is an approval step with
+            this rule, step 2 a review (fulfilment) step with named assignees; GET /api/meta returns the template as
+            accessWorkflowTemplate.
+        olaEnabled:
+          type: boolean
+          description: Whether this step is measured against an OLA in business days from when its task is raised.
+        olaBusinessDays:
+          type: integer
+          minimum: 1
+          maximum: 365
+          description: Business days allowed to complete the task when olaEnabled is true.
+    WorkflowDefinition:
+      type: object
+      required: [name, requestType, steps]
+      properties:
+        id:
+          type: string
+          readOnly: true
+        name:
+          type: string
+        description:
+          type: string
+        requestType:
+          $ref: "#/components/schemas/RequestType"
+        enabled:
+          type: boolean
+          description: Whether submitting a request of this form starts this workflow. At most one workflow per form may be enabled.
+        slaEnabled:
+          type: boolean
+          description: Default SLA for requests of this form (Monday–Friday business days, skipping platform holidays). The catalog form can still set SLA on each request.
+        slaBusinessDays:
+          type: integer
+          minimum: 1
+          maximum: 365
+        status:
+          $ref: "#/components/schemas/LifecycleStatus"
+        steps:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkflowStepDefinition"
+    TaskActionRecord:
+      type: object
+      properties:
+        actorId:
+          type: string
+        actorName:
+          type: string
+        action:
+          $ref: "#/components/schemas/TaskStatus"
+        comment:
+          type: string
+        actedAt:
+          type: string
+          format: date-time
+    TaskView:
+      type: object
+      description: A task with the step it mirrors, the run and workflow it belongs to, the request under review, who may act, and what has been done.
+      properties:
+        id:
+          type: string
+        status:
+          $ref: "#/components/schemas/TaskStatus"
+        createdAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+        retiredAt:
+          type: string
+          format: date-time
+          description: Present once the task record is retired (its run completed, or it was retired through DELETE /api/nodes/task/{id}).
+        step:
+          $ref: "#/components/schemas/WorkflowStepDefinition"
+        finalStep:
+          type: boolean
+          description: Completing this task fulfils the request.
+        runId:
+          type: string
+        runStatus:
+          type: string
+          enum: [active, completed, returned]
+        workflowId:
+          type: string
+        workflowName:
+          type: string
+        request:
+          $ref: "#/components/schemas/Node"
+        requester:
+          $ref: "#/components/schemas/Assignee"
+        assignees:
+          type: array
+          items:
+            $ref: "#/components/schemas/Assignee"
+        eligibleActors:
+          type: array
+          description: Identities who may act on the task: direct assignees plus members of assigned groups.
+          items:
+            $ref: "#/components/schemas/Assignee"
+        actions:
+          type: array
+          items:
+            $ref: "#/components/schemas/TaskActionRecord"
+        requestedFor:
+          $ref: "#/components/schemas/Assignee"
+          description: Access requests only; the identity the access is for.
+        item:
+          $ref: "#/components/schemas/AccessItemView"
+          description: Access requests only; the role or entitlement this task decides (approval) or provisions (fulfilment).
+        items:
+          type: array
+          description: Access requests only; every item on the request with its decision, so a task shows its siblings.
+          items:
+            $ref: "#/components/schemas/AccessItemView"
+        sla:
+          $ref: "#/components/schemas/AgreementClock"
+        ola:
+          $ref: "#/components/schemas/AgreementClock"
+    AgreementClock:
+      type: object
+      description: Progress of an SLA (request) or OLA (task) counted in Monday–Friday business days, skipping holidays marked by the platform super admin.
+      properties:
+        kind:
+          type: string
+          enum: [sla, ola]
+        enabled:
+          type: boolean
+        businessDays:
+          type: integer
+        startedAt:
+          type: string
+          format: date-time
+        dueAt:
+          type: string
+          description: Last included business day (YYYY-MM-DD).
+        elapsedDays:
+          type: integer
+        remainingDays:
+          type: integer
+        progress:
+          type: number
+          description: elapsedDays / businessDays; may exceed 1 when overdue.
+        status:
+          type: string
+          enum: [none, on-track, due-today, overdue, met, missed]
+        overdue:
+          type: boolean
+    Holiday:
+      type: object
+      required: [date]
+      properties:
+        date:
+          type: string
+          description: Closed business day as YYYY-MM-DD.
+        name:
+          type: string
+    TaskActionInput:
+      type: object
+      required: [actorId, action]
+      properties:
+        actorId:
+          type: string
+          description: The identity acting on the task; must be an eligible actor.
+        action:
+          $ref: "#/components/schemas/TaskAction"
+        comment:
+          type: string
+          description: Required when rejecting (returning a vendor request to its requester, or denying an access item).
+        properties:
+          $ref: "#/components/schemas/Properties"
+    AccessItemView:
+      type: object
+      required: [id, kind]
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+          enum: [role, entitlement]
+        name:
+          type: string
+        applicationId:
+          type: string
+        applicationName:
+          type: string
+        note:
+          type: string
+          description: The requester's note for this item.
+        decision:
+          type: string
+          enum: [pending, approved, denied, fulfilled]
+        decidedAt:
+          type: string
+          format: date-time
+        decidedBy:
+          type: string
+          description: The Accountable who approved or denied it.
+        fulfilledAt:
+          type: string
+          format: date-time
+    AccessOption:
+      type: object
+      required: [id, kind, owner]
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+          enum: [role, entitlement]
+        name:
+          type: string
+        description:
+          type: string
+        owner:
+          $ref: "#/components/schemas/Assignee"
+          description: The Accountable who approves requests for it.
+    AccessApplication:
+      type: object
+      required: [id, roles, entitlements]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        roles:
+          type: array
+          items:
+            $ref: "#/components/schemas/AccessOption"
+        entitlements:
+          type: array
+          items:
+            $ref: "#/components/schemas/AccessOption"
+    AccessHolding:
+      type: object
+      required: [id, kind, via]
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+          enum: [role, entitlement]
+        name:
+          type: string
+        via:
+          type: string
+          enum: [birthright, role, direct, pending]
+          description: How the identity already has it, or that it is on an open request.
+        source:
+          type: string
+          description: The birthright, role, or request it comes through.
+    AccessOptions:
+      type: object
+      required: [identity, applications, held]
+      properties:
+        identity:
+          $ref: "#/components/schemas/Assignee"
+        applications:
+          type: array
+          items:
+            $ref: "#/components/schemas/AccessApplication"
+        held:
+          type: array
+          items:
+            $ref: "#/components/schemas/AccessHolding"
+    AccessAnomalyReport:
+      type: object
+      required: [anomalies]
+      properties:
+        computedAt:
+          type: string
+          format: date-time
+          description: When the snapshot was computed; absent until the scheduled check has run once.
+        anomalies:
+          type: array
+          items:
+            $ref: "#/components/schemas/AccessAnomaly"
+    AccessAnomaly:
+      type: object
+      required: [identity, item, birthrights, roles, paths]
+      description: >-
+        An identity that holds the same role or entitlement through more than one path: a birthright,
+        a held role that includes the entitlement, and/or a direct permissions link.
+      properties:
+        identity:
+          $ref: "#/components/schemas/Assignee"
+        item:
+          $ref: "#/components/schemas/Assignee"
+        birthrights:
+          type: array
+          items:
+            $ref: "#/components/schemas/Assignee"
+        roles:
+          type: array
+          description: Roles that include the item when the automatic path is via role membership.
+          items:
+            $ref: "#/components/schemas/Assignee"
+        paths:
+          type: array
+          items:
+            type: string
+          description: The overlapping paths (subset of birthright, role, direct).
+    AccessRequestItemInput:
+      type: object
+      required: [id, kind]
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+          enum: [role, entitlement]
+        note:
+          type: string
+    AccessRequestInput:
+      type: object
+      required: [requestedById, requestForId, items]
+      properties:
+        requestedById:
+          type: string
+          description: The identity raising the request (linked form-submitted).
+        requestForId:
+          type: string
+          description: The identity the access is for (linked requested-for).
+        items:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/AccessRequestItemInput"
+        slaEnabled:
+          type: boolean
+          description: Whether this request is measured against an SLA in business days (Monday–Friday, skipping platform holidays).
+        slaBusinessDays:
+          type: integer
+          minimum: 1
+          maximum: 365
+          description: Business days allowed to complete the request when slaEnabled is true.
+    DailyHours:
+      type: string
+      description: Hours of operation for one weekday on location CIs, as HH:MM-HH:MM in the location's timezone, or the literal "closed". A closing time at or before the opening time runs past midnight.
+      pattern: '^(closed|([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d)$'
+      example: 08:00-17:00
     RelationshipKind:
       type: string
-      enum: [has-job-code, qualifies-for, grants, includes, affects, changes, observed-on, depends-on, hosted-on, uses, used-by]
-      description: Canonical lowercase kebab-case relationship names. The API also accepts uppercase underscore aliases.
+      enum: [has-job-code, work-location, member, drafted-request, form-submitted, requested-for, requests-access, has-step, next-step, step-assigned-to, run-for, instance-of, task-for, task-step, task-item, task-assigned-to, acted-by, fulfilled-by, qualifies-for, grants, includes, has-role, entitled-by, permissions, affects, changes, assigned-to, observed-on, depends-on, hosts, uses, governs, provides, accountable, responsible, consulted, informed]
+      description: >-
+        Canonical lowercase kebab-case forward relationship names. The API also accepts uppercase underscore aliases.
+        Every relationship is stored once in its forward direction; GET /api/meta returns the inverse label for each
+        kind (for example grants / granted-by, hosts / hosted-by, uses / used-by, governs / governed-by,
+        provides / provided-by, member / member-of for Group to Identity) so clients can present the edge from
+        either endpoint's perspective. governs must
+        start from a contract CI; provides connects service and function CIs with one another, or a vendor CI with the application, server, or printer
+        CIs it supplies (see ciTypeRules in GET /api/meta); work-location
+        (Identity to CI, inverse work-location-for) must end on a location CI. RACI ownership of a CI, job code,
+        birthright, role, or entitlement (see fromKinds in GET /api/meta) is recorded
+        with accountable / accountable-for (to one Identity), and responsible / responsible-for, consulted /
+        consulted-on, informed / informed-of (to Identity or Group; see toKinds in GET /api/meta).
+        Access: has-role / role-for ties an application CI to its roles, and entitled-by / entitlement-for ties it
+        to its entitlements (a role or entitlement is for one application);
+        permissions / permissioned-by records a role or entitlement granted to an Identity directly, outside a
+        birthright (the edge carries requestId, grantedAt, grantedBy, and note when it came from an access request).
+        An access request names its subject with requested-for / subject-of (Request to Identity) and its items
+        with requests-access / requested-on (Request to Role or Entitlement; note, decision, decidedAt, decidedBy,
+        fulfilledAt on the edge); each task of its run points at the item it is about with task-item / item-task.
+        assigned-to / assignee-of records which Identity or Group is working an Incident. Catalog requests are tied
+        to their requester with drafted-request / drafted-request-for (Identity to Request) while in draft; submitting
+        the request retires that link and creates form-submitted / submitted-by from the same Identity.
+        Workflow definitions use has-step / step-of (Workflow to WorkflowStep), next-step / previous-step between
+        consecutive steps, and step-assigned-to / assigned-step (WorkflowStep to Identity or Group). Runs use
+        run-for / has-run (WorkflowRun to Request), instance-of / has-instance (WorkflowRun to Workflow),
+        task-for / has-task (Task to WorkflowRun), task-step / step-task (Task to WorkflowStep),
+        task-assigned-to / assigned-task (Task to Identity or Group), acted-by / acted-on (Task to the Identity who
+        completed, approved, or rejected it, with action, comment, and actedAt on the edge), and fulfilled-by /
+        fulfills (Request to the CI created from it).
     Properties:
       type: object
       properties:
         ciType:
           $ref: "#/components/schemas/CIType"
           description: Required for CI records; fixed enum values are returned by GET /api/meta.
+        category:
+          $ref: "#/components/schemas/CICategory"
+          description: Required for service, process, and function CIs; fixed enum values are returned by GET /api/meta.
+        contractType:
+          $ref: "#/components/schemas/ContractType"
+          description: Required for contract CIs; fixed enum values are returned by GET /api/meta.
+        hosted:
+          $ref: "#/components/schemas/HostingModel"
+          description: Required for application CIs; fixed enum values are returned by GET /api/meta.
+        criticality:
+          $ref: "#/components/schemas/Criticality"
+          description: Required for vendor CIs and for vendor requests at submission; fixed enum values are returned by GET /api/meta.
+        critical:
+          type: boolean
+          description: >-
+            Optional on CI records; true when the configuration item is business-critical. Defaults to false on
+            create. Distinct from vendor criticality ranking.
+        nodeDown:
+          type: boolean
+          description: Optional on incident records; true when the affected node/CI is currently down. Defaults to false on create.
+        requestType:
+          $ref: "#/components/schemas/RequestType"
+          description: Required when creating request records; fixed once set.
+        state:
+          description: >-
+            On request records, the RequestState (draft on creation; update to submitted to submit). On location
+            CIs, the two-letter US state code of the address.
+          oneOf:
+            - $ref: "#/components/schemas/RequestState"
+            - type: string
+        submittedAt:
+          type: string
+          format: date-time
+          description: Set by the application when a request is submitted; cannot be supplied by callers.
+        returnComment:
+          type: string
+          description: Set by the workflow when a reviewer returns the request to its requester; cleared on resubmission. Cannot be supplied by callers.
+        returnedAt:
+          type: string
+          format: date-time
+          description: When the request was last returned to its requester. Cannot be supplied by callers.
+        fulfilledAt:
+          type: string
+          format: date-time
+          description: When the workflow created the CI from this request.
+        contactName:
+          type: string
+          description: Vendor contact name, carried by vendor CIs and vendor requests.
+        contactPhone:
+          type: string
+          description: >-
+            Vendor contact phone number, carried by vendor CIs and vendor requests. Accepts common
+            punctuation and an optional +country code; stored as "(555) 010-0100" for North American
+            numbers or "+" followed by 7–15 digits for other countries. Anything else is rejected.
+          example: "(555) 010-0100"
+        contactEmail:
+          type: string
+          format: email
+          description: Vendor contact email address, carried by vendor CIs and vendor requests; validated and lower-cased when present.
+        name:
+          type: string
+          description: Display name. Server, printer, data-connector, application, service, process, function, location, contract, and vendor CIs all carry a name.
+        description:
+          type: string
+          description: Free-text description carried by server, printer, data-connector, application, service, process, function, and contract CIs.
+        timezone:
+          type: string
+          description: IANA time zone for location CIs (for example America/New_York). Hours of operation are interpreted in this zone.
+          example: America/New_York
+        hoursMonday:
+          $ref: "#/components/schemas/DailyHours"
+        hoursTuesday:
+          $ref: "#/components/schemas/DailyHours"
+        hoursWednesday:
+          $ref: "#/components/schemas/DailyHours"
+        hoursThursday:
+          $ref: "#/components/schemas/DailyHours"
+        hoursFriday:
+          $ref: "#/components/schemas/DailyHours"
+        hoursSaturday:
+          $ref: "#/components/schemas/DailyHours"
+        hoursSunday:
+          $ref: "#/components/schemas/DailyHours"
+        latitude:
+          type: number
+          minimum: -90
+          maximum: 90
+          description: Plotted latitude for location CIs. Derived by the server from the address when a location is created or its address changes; supply latitude and longitude together to pin a site manually.
+        longitude:
+          type: number
+          minimum: -180
+          maximum: 180
+          description: Plotted longitude for location CIs; see latitude.
+        geoPrecision:
+          type: string
+          enum: [address, state, manual]
+          readOnly: true
+          description: How the location coordinates were determined. `address` is a street-level geocoder match, `state` is the state's center used as a fallback, and `manual` means coordinates were supplied by the caller.
       additionalProperties:
         oneOf:
           - type: string
@@ -364,6 +1476,12 @@ components:
           type: string
         toId:
           type: string
+        fromName:
+          type: string
+          description: Display name of the source node. Present on the direct relationships returned with a node listing.
+        toName:
+          type: string
+          description: Display name of the target node. Present on the direct relationships returned with a node listing.
         properties:
           $ref: "#/components/schemas/Properties"
         status:
@@ -382,7 +1500,7 @@ components:
           description: CI records must include ciType using the CIType enum.
         ciIds:
           type: array
-          description: Required and non-empty for incident and change; optional for events; not valid for CI creation. All referenced CIs must be active.
+          description: Required and non-empty for incident and change; optional for events (observed-on) and identities (work-location, must reference location CIs); not valid for other kinds. All referenced CIs must be active.
           minItems: 1
           items:
             type: string
@@ -407,7 +1525,7 @@ components:
           $ref: "#/components/schemas/Properties"
     Metadata:
       type: object
-      required: [nodeKinds, ciTypes, relationships]
+      required: [nodeKinds, ciTypes, ciCategories, contractTypes, hostingModels, criticalities, requestTypes, requestStates, relationships]
       properties:
         nodeKinds:
           type: array
@@ -417,18 +1535,125 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/CIType"
+        ciCategories:
+          type: array
+          items:
+            $ref: "#/components/schemas/CICategory"
+        contractTypes:
+          type: array
+          items:
+            $ref: "#/components/schemas/ContractType"
+        hostingModels:
+          type: array
+          items:
+            $ref: "#/components/schemas/HostingModel"
+        criticalities:
+          type: array
+          items:
+            $ref: "#/components/schemas/Criticality"
+        requestTypes:
+          type: array
+          items:
+            $ref: "#/components/schemas/RequestType"
+        requestStates:
+          type: array
+          items:
+            $ref: "#/components/schemas/RequestState"
+        requestFields:
+          type: object
+          description: For each request type, the form fields a workflow step may expose to its assignees.
+          additionalProperties:
+            type: array
+            items:
+              type: string
+          example: { vendor: [name, description, criticality, contactName, contactPhone, contactEmail] }
+        fulfilmentFields:
+          type: object
+          description: For each request type, the CI properties the requester does not supply; an enabled workflow must require each at some step.
+          additionalProperties:
+            type: array
+            items:
+              type: string
+          example: { vendor: [criticality] }
+        stepTypes:
+          type: array
+          items:
+            $ref: "#/components/schemas/StepType"
+        approvalRules:
+          type: array
+          items:
+            $ref: "#/components/schemas/ApprovalRule"
+        taskActions:
+          type: array
+          items:
+            $ref: "#/components/schemas/TaskAction"
         relationships:
           type: array
           items:
             type: object
-            required: [kind, from, to]
+            required: [kind, inverse, from, to]
             properties:
               kind:
                 $ref: "#/components/schemas/RelationshipKind"
+              inverse:
+                type: string
+                description: How the relationship reads from the "to" node (for example granted-by for grants).
+                example: granted-by
               from:
                 $ref: "#/components/schemas/NodeKind"
               to:
                 $ref: "#/components/schemas/NodeKind"
+              fromCiTypes:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CIType"
+                description: Present when the from node must be a CI of one of these types (governs requires a contract CI; provides accepts a service, function, or vendor CI). When ciTypeRules is present this is the union across rules.
+              toCiTypes:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CIType"
+                description: Present when the to node must be a CI of one of these types (work-location requires a location CI). When ciTypeRules is present this is the union across rules.
+              ciTypeRules:
+                type: array
+                description: >-
+                  Present when the allowed to types depend on the from type. Each rule pairs a set of from CI types with the to CI
+                  types they may connect to; an empty side accepts any CI type. provides has two rules: service/function to
+                  service/function, and vendor to application/server/printer.
+                items:
+                  type: object
+                  required: [from, to]
+                  properties:
+                    from:
+                      type: array
+                      items:
+                        $ref: "#/components/schemas/CIType"
+                    to:
+                      type: array
+                      items:
+                        $ref: "#/components/schemas/CIType"
+              fromKinds:
+                type: array
+                items:
+                  $ref: "#/components/schemas/NodeKind"
+                description: Present when the from node may be more than one kind (the RACI kinds start from a CI, job code, birthright, role, or entitlement; permissions starts from a role or entitlement). Otherwise the from node is always of kind `from`.
+              toKinds:
+                type: array
+                items:
+                  $ref: "#/components/schemas/NodeKind"
+                description: Present when the to node may be more than one kind (responsible, consulted, informed, and assigned-to accept an identity or a group; grants, requests-access, and task-item end on a role or an entitlement). Otherwise the to node is always of kind `to`.
+        raciKinds:
+          type: array
+          description: The node kinds that carry RACI ownership (accountable, responsible, consulted, informed).
+          items:
+            $ref: "#/components/schemas/NodeKind"
+        accessItemKinds:
+          type: array
+          description: The node kinds an access request can ask for and an identity can be permissioned to directly.
+          items:
+            $ref: "#/components/schemas/NodeKind"
+        accessWorkflowTemplate:
+          $ref: "#/components/schemas/WorkflowDefinition"
+          description: The fixed shape of the access request workflow, ready for the fulfilment assignees to be filled in and saved.
     Error:
       type: object
       required: [error]
@@ -438,6 +1663,12 @@ components:
   responses:
     BadRequest:
       description: Invalid input or unsupported kind.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: The X-Actor-Id lacks a required Anthos platform capability.
       content:
         application/json:
           schema:

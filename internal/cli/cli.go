@@ -11,6 +11,7 @@ import (
 
 	"github.com/PlatformHelios/servicemap-graph-poc/internal/cmdb"
 	"github.com/PlatformHelios/servicemap-graph-poc/internal/config"
+	"github.com/PlatformHelios/servicemap-graph-poc/internal/geocode"
 	"github.com/PlatformHelios/servicemap-graph-poc/internal/graph"
 )
 
@@ -19,15 +20,54 @@ const usage = `Usage:
   servicemap node <create|get|list|update|retire> --kind <kind> [options]
   servicemap relationship <create|get|list|update|retire> --kind <kind> [options]
 
-Node kinds: identity, job-code, birthright, role, entitlement, ci, incident, change, event
-CI types: server, printer, data-connector, application (fixed enum; add types through a reviewed software release)
-Relationship kinds: HAS_JOB_CODE, QUALIFIES_FOR, GRANTS, INCLUDES, AFFECTS, CHANGES, OBSERVED_ON, DEPENDS_ON, HOSTED_ON, USES, USED_BY
+Node kinds: identity, job-code, birthright, role, entitlement, group, ci, incident, change, event, request,
+  workflow, workflow-step, workflow-run, task (the last four are managed through the workflow API or dashboard; here they can be
+  listed, fetched, and retired: a finished run retires with its tasks, a pending task or active run is refused)
+Groups carry name and description; membership is the member / member-of relationship from a group to an identity
+Requests: requestType=vendor (Vendor Request Form) with the vendor's name, description, and contact details (contactName, contactPhone,
+  contactEmail); created as state=draft and tied to the requester with drafted-request / drafted-request-for. Update state=submitted once
+  the vendor name is set to submit (criticality is decided when the CI is created): the draft link is
+  retired and form-submitted / submitted-by is created from the same identity. Submitted requests stay editable but callers cannot return
+  them to draft. States: draft, submitted, in-review (an enabled workflow is running), fulfilled (the CI was created from the request),
+  denied (every item of an access request was refused)
+Access requests: requestType=access is raised complete through the dashboard's Access Request Form (API: GET /api/access-options?identityId=,
+  POST /api/access-requests), not through node create. It asks for roles or entitlements the identity does not already hold (an application CI
+  must has-role the role or be entitled-by the entitlement, and they need an Accountable owner); each item goes to its Accountable for approval, approved items go to the
+  fulfilment step, and provisioning records permissions / permissioned-by from the role or entitlement to the identity
+Workflows: built in the dashboard's Workflow Creator (API: /api/workflows) per catalog form, as ordered review or approval steps assigned
+  to identities or groups, each exposing editable and required request fields. Submitting a form starts the enabled workflow; tasks are
+  worked under Workflow Tasks (API: /api/tasks). Completing the last step creates the CI, links fulfilled-by / fulfills, and retires the
+  request, its run, and its tasks (the CI is the live record; list them with --include-retired); returning a
+  request sets it back to draft with returnComment / returnedAt for the requester to fix and resubmit
+CI types: server, printer, data-connector, application, service, process, function, location, contract, vendor (fixed enum; add types through a reviewed software release)
+CI categories: business, technology, security (required for service, process, and function CIs)
+Contract types: basic-contract, msa, nda (required for contract CIs)
+Vendor criticality: critical, important, business-support (required for vendor CIs, which also carry name, description, and
+  contactName / contactPhone / contactEmail; phone numbers are stored as (555) 010-0100 or +<country code><digits>)
+Application hosting: hosted=internal or external (required for application CIs); server, printer, data-connector and application CIs carry name and description
+Location hours: hoursMonday..hoursSunday as HH:MM-HH:MM or "closed", with an IANA timezone property
+Location coordinates: latitude/longitude/geoPrecision are set from the address automatically; pass both latitude and longitude to pin a site manually
+Relationship kinds (forward / inverse): has-job-code / job-code-for, work-location / work-location-for (identity to location CI),
+  member / member-of (group to identity), drafted-request / drafted-request-for and form-submitted / submitted-by (identity to request),
+  requested-for / subject-of (request to identity), requests-access / requested-on (request to role or entitlement),
+  workflow: has-step / step-of, next-step / previous-step, step-assigned-to / assigned-step, run-for / has-run, instance-of / has-instance,
+  task-for / has-task, task-step / step-task, task-item / item-task (task to role or entitlement), task-assigned-to / assigned-task,
+  acted-by / acted-on, fulfilled-by / fulfills (request to CI),
+  qualifies-for / qualified-by, grants / granted-by (birthright to role or entitlement), includes / included-by, has-role / role-for (application CI to role),
+  entitled-by / entitlement-for (application CI to entitlement),
+  permissions / permissioned-by (role or entitlement to identity), affects / affected-by, changes / changed-by,
+  assigned-to / assignee-of (incident to identity or group), observed-on / observed, depends-on / depended-on-by, hosts / hosted-by, uses / used-by, governs / governed-by (from a contract CI),
+  provides / provided-by (service or function CI to service or function CI, or vendor CI to application, server, or printer CI),
+  RACI on CIs, job codes, birthrights, roles, and entitlements: accountable / accountable-for (to identity), responsible / responsible-for,
+  consulted / consulted-on, informed / informed-of (to identity or group)
+  Relationships are stored once in the forward direction; the inverse is how the same edge reads from the other side.
+  Retiring an edge moves it to the <TYPE>_RETIRED relationship type; --include-retired reads both.
 
 Node options:
-	--id <id>                    Required for get/update/retire; all node IDs are assigned automatically on create
+	--id <id>                    Required for get/update/retire; node IDs are assigned on create as PREFIX-000001
   --properties <json-object>   Properties for create/update
-	--ci-ids <id,id,...>         Required for incident/change; optional for events; invalid for other nodes
-  --include-retired            Include retired results for get/list
+	--ci-ids <id,id,...>         Required for incident/change; optional for events and identities (work location); invalid for other nodes
+  --include-retired            Include retired results for get/list (list shows at most 200 attached relationships per node; get shows all)
 
 Relationship options:
   --from-id <id> --to-id <id>  Required except for list
@@ -76,7 +116,7 @@ func Run(ctx context.Context, args []string, output io.Writer) error {
 	}
 	defer store.Close(ctx)
 
-	service := cmdb.NewService(store)
+	service := cmdb.NewService(store).WithGeocoder(geocode.NewCensus(nil))
 	if parsed.group == "init" {
 		if err := service.EnsureConstraints(ctx); err != nil {
 			return err
@@ -206,7 +246,8 @@ func execute(ctx context.Context, service *cmdb.Service, parsed command) (any, e
 		case "get":
 			return service.GetNode(ctx, parsed.nodeKind, parsed.id, parsed.includeRetired)
 		case "list":
-			return service.ListNodes(ctx, parsed.nodeKind, parsed.includeRetired)
+			nodes, _, err := service.ListNodes(ctx, parsed.nodeKind, cmdb.ListOptions{IncludeRetired: parsed.includeRetired})
+			return nodes, err
 		case "update":
 			return service.UpdateNode(ctx, parsed.nodeKind, parsed.id, parsed.properties)
 		case "retire":
@@ -219,7 +260,8 @@ func execute(ctx context.Context, service *cmdb.Service, parsed command) (any, e
 	case "get":
 		return service.GetRelationship(ctx, parsed.relationship, parsed.fromID, parsed.toID, parsed.includeRetired)
 	case "list":
-		return service.ListRelationships(ctx, parsed.relationship, parsed.includeRetired)
+		relationships, _, err := service.ListRelationships(ctx, parsed.relationship, cmdb.ListOptions{IncludeRetired: parsed.includeRetired})
+		return relationships, err
 	case "update":
 		return service.UpdateRelationship(ctx, parsed.relationship, parsed.fromID, parsed.toID, parsed.properties)
 	case "retire":

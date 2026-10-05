@@ -53,7 +53,7 @@ func TestRetireNodeRetiresOnlyIncidentRelationships(t *testing.T) {
 	if _, err := service.CreateRelationship(ctx, cmdb.Grants, birthrightID, roleID, nil); err != nil {
 		t.Fatal(err)
 	}
-	identities, err := service.ListNodes(ctx, cmdb.Identity, false)
+	identities, _, err := service.ListNodes(ctx, cmdb.Identity, cmdb.ListOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestRetireNodeRetiresOnlyIncidentRelationships(t *testing.T) {
 	if jobCode.Status != "retired" {
 		t.Fatalf("job code status = %q, want retired", jobCode.Status)
 	}
-	identities, err = service.ListNodes(ctx, cmdb.Identity, false)
+	identities, _, err = service.ListNodes(ctx, cmdb.Identity, cmdb.ListOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func TestRetireNodeRetiresOnlyIncidentRelationships(t *testing.T) {
 			t.Errorf("default node list included retired relationship: %#v", identity.Relationships)
 		}
 	}
-	identities, err = service.ListNodes(ctx, cmdb.Identity, true)
+	identities, _, err = service.ListNodes(ctx, cmdb.Identity, cmdb.ListOptions{IncludeRetired: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,18 +178,18 @@ func TestCreateIncidentWithCIsIsAtomic(t *testing.T) {
 		t.Fatalf("created incident relationships = %#v, want one AFFECTS link to %s", incident.Relationships, ciID)
 	}
 
-	incidentsBefore, err := service.ListNodes(ctx, cmdb.Incident, true)
+	_, before, err := service.ListNodes(ctx, cmdb.Incident, cmdb.ListOptions{IncludeRetired: true, Limit: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := service.CreateGeneratedNode(ctx, cmdb.Incident, nil, []string{"missing-" + suffix}); !errors.Is(err, cmdb.ErrInvalid) {
 		t.Fatalf("create incident with missing CI error = %v, want ErrInvalid", err)
 	}
-	incidentsAfter, err := service.ListNodes(ctx, cmdb.Incident, true)
+	_, after, err := service.ListNodes(ctx, cmdb.Incident, cmdb.ListOptions{IncludeRetired: true, Limit: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(incidentsAfter) != len(incidentsBefore) {
-		t.Fatalf("missing-CI create left an incident behind: counts before=%d after=%d", len(incidentsBefore), len(incidentsAfter))
+	if after.Total != before.Total {
+		t.Fatalf("missing-CI create left an incident behind: counts before=%d after=%d", before.Total, after.Total)
 	}
 }
