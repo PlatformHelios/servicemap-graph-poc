@@ -1,130 +1,247 @@
 # servicemap-graph-poc
 
-A Go application for managing identity/access and CMDB records in Neo4j. The Go API is the backend for the React/Vite dashboard; the CLI remains available for terminal workflows.
+A Go application for managing identity/access and CMDB records in Neo4j. The Go API is the backend for a React/Vite dashboard; a CLI is also available for terminal workflows.
 
-## Requirements
+## Quick start
 
-- Go 1.26 or later
-- Neo4j with Bolt connectivity enabled
-- Node.js 20.19+ or 22.12+ with npm (frontend development/build only)
+Run every command from the repository root. Examples use Podman; with Docker, replace `podman` with `docker`.
 
-## Configure the connection
+### 1. Install the prerequisites
 
-In PowerShell, set the connection environment variables for the current terminal:
+- [Podman](https://podman.io/docs/installation) with Compose (`podman compose version`), or [Docker](https://docs.docker.com/get-docker/) with Compose v2
+- Free host ports 3000, 3100, 4317, 4318, 7474, 7687, 8080, 8081, 9090, and 9092. Stop any standalone Neo4j, OpenTelemetry collector, Loki, Grafana, Prometheus, or Kafka containers that already use them.
+- Only for [developing on the host](#develop-on-the-host): Go 1.26 or later, and Node.js 20.19+ or 22.12+ with npm
+
+### 2. Set environment variables
+
+Compose reads `.env` from the repository root. It is optional; without it the defaults below apply.
 
 ```powershell
-$env:GOOS = "windows"
-$env:GOARCH = "amd64"
+Copy-Item .env.example .env
+```
+
+| Variable | Default | Used for |
+| --- | --- | --- |
+| `NEO4J_PASSWORD` | `your_password` | Neo4j's initial password and the API's connection. At least 8 characters. Set it before the first start: Neo4j keeps the password it was created with until its volume is deleted. |
+
+The API container's other settings (Neo4j URI, OTLP endpoint, listen address) are preset in `compose.yaml`; see [Configuration](#configuration) for everything the API reads.
+
+### 3. Build the images
+
+```powershell
+podman compose build
+```
+
+This builds `api` (the Go API with the dashboard embedded) and `web` (the dashboard on nginx). The first build takes a few minutes.
+
+### 4. Start the environment
+
+```powershell
+podman compose up -d
+podman compose ps
+```
+
+The `api` container waits for Neo4j to report healthy (up to about two minutes on a first start) and applies the database schema itself; no separate `init` step is needed.
+
+### 5. Open it
+
+| What | URL |
+| --- | --- |
+| Dashboard | http://127.0.0.1:8080 |
+| Swagger UI | http://127.0.0.1:8080/api/docs |
+| Grafana (API logs under the Loki data source) | http://localhost:3000 |
+| Neo4j Browser (user `neo4j`, password from step 2) | http://localhost:7474 |
+
+Stop with `podman compose down`; add `-v` to also delete the data. After code changes, rebuild and restart with `podman compose up -d --build`.
+
+To work on the code with live reload, run only the prerequisites in containers and the apps on the host; see [Develop on the host](#develop-on-the-host).
+
+## Contents
+
+- [Getting started](#getting-started)
+- [Configuration](#configuration)
+- [Web dashboard](#web-dashboard)
+- [HTTP API](#http-api)
+- [CLI](#cli)
+- [Data model](#data-model)
+- [Catalog requests and workflows](#catalog-requests-and-workflows)
+- [Tests](#tests)
+
+## Getting started
+
+By default everything runs in containers. To work on the code with live reload, [develop on the host](#develop-on-the-host) instead.
+
+### Run in containers
+
+```powershell
+podman compose up -d --build      # or: docker compose up -d --build
+```
+
+| Service | Host port | Purpose |
+| --- | --- | --- |
+| `api` | 127.0.0.1:8080 | Go API with the dashboard embedded, plus Swagger UI at `/api/docs` (`Dockerfile`). Waits for Neo4j, applies the schema on startup, and exports logs to the collector. |
+| `web` | 127.0.0.1:8081 | Standalone dashboard served by nginx, proxying `/api` to the `api` service (`web/Dockerfile`). Can be deployed and scaled separately from the API. |
+| `neo4j` | 7474 (browser), 7687 (Bolt) | Graph store. Password is `NEO4J_PASSWORD` from `.env` (see `.env.example`), default `your_password`. |
+| `otel-collector` | 4317 (gRPC), 4318 (HTTP) | Receives OTLP from the API and forwards logs to Loki (`deploy/otel-collector.yaml`). |
+| `loki` | 3100 | Log store, 24h retention (`deploy/loki.yaml`). |
+| `prometheus` | 127.0.0.1:9090 | Scrapes itself, the collector, and Loki (`deploy/prometheus.yml`). |
+| `grafana` | 3000 | Anonymous admin, with Loki and Prometheus data sources provisioned. |
+| `kafka` | 9092 | Single-node KRaft broker. Containers on the compose network use `kafka:19092`. |
+
+- **Rebuild after code changes:** run `podman compose up -d --build` again (or `podman compose up -d --build api web` for just the apps).
+- **Stop:** `podman compose down`. Data lives in named volumes; add `-v` to delete it.
+- **Logs:** `podman compose logs -f api`, or in Grafana under the Loki data source as `{service_name="servicemap-graph-poc"}`.
+- **CLI:** the API image's entrypoint is the binary, so CLI commands run against the stack with `podman compose exec api /servicemap node list --kind identity`.
+
+#### Building images directly
+
+```powershell
+podman build -t servicemap-api .         # context is the repo root
+podman build -t servicemap-web web       # context is web/
+```
+
+The API image is a multi-stage build: it builds the dashboard with Node, embeds the output in the Go binary, and runs it on `distroless/static` as a non-root user, with `serve` as the default command. The web image listens on port 8080 and proxies `/api` to `API_UPSTREAM` (default `http://api:8080`). For example, against an API running on the host (Docker uses `host.docker.internal`):
+
+```powershell
+podman run --rm -p 8081:8080 -e API_UPSTREAM=http://host.containers.internal:8080 servicemap-web
+```
+
+### Develop on the host
+
+Run the prerequisites in containers and the Go API and Vite dev server on the host. If the `api` container is running, stop it first with `podman compose stop api web`, since both use port 8080.
+
+#### 1. Start the prerequisites
+
+```powershell
+podman compose up -d neo4j otel-collector loki prometheus grafana kafka
+```
+
+#### 2. Run the API
+
+```powershell
 $env:NEO4J_URI = "bolt://localhost:7687"
 $env:NEO4J_USERNAME = "neo4j"
 $env:NEO4J_PASSWORD = "your_password"
-$env:NEO4J_DATABASE = "neo4j"
+$env:OTEL_SERVICE_NAME = "servicemap-graph-poc"
+$env:OTEL_EXPORTER_OTLP_ENDPOINT = "http://localhost:4318"
+
+go run . init     # first run only: constraints, indexes, migrations
+go run . serve
 ```
 
-`NEO4J_DATABASE` is optional. For a Podman-managed named volume, mount the volume at `/data`; Neo4j's Bolt port must be published to the host, for example `--publish=7687:7687`.
+`init` needs an account with schema privileges. `serve` also applies constraints, indexes, and pending migrations at startup.
 
-Initialize uniqueness constraints once using an account with schema privileges:
+If `go env GOOS` reports something other than your OS (for example a persisted `go env -w GOOS=linux` for cross-compiling), `go run` and `go test` fail with "not a valid Win32 application". Override it for the terminal with `$env:GOOS = "windows"; $env:GOARCH = "amd64"`, or clear it with `go env -u GOOS GOARCH`.
+
+#### 3. Run the dashboard
+
+In a second terminal:
 
 ```powershell
-go run . init
+Push-Location web
+npm ci
+npm run dev
 ```
 
-## Identity and access graph
+Open `http://127.0.0.1:5173`. Vite proxies `/api` to the Go server at `http://127.0.0.1:8080`.
 
-The CLI manages these node kinds: `identity`, `job-code`, `birthright`, `role`, `entitlement`, and `group`. Groups carry a `name` and `description`, and membership is recorded with the `member` / `member-of` relationship (a group *member* identity; an identity is *member-of* a group). The group form's **Members** picker adds and removes those links on save. Relationships have a fixed direction and endpoint type:
+### Production build without containers
+
+Build the frontend before building Go:
+
+```powershell
+Push-Location web
+npm ci
+npm run build
+Pop-Location
+go build -o cmdb.exe .
+```
+
+Vite writes the built app to `internal/httpapi/static`, where Go embeds and serves it, so Node.js is not needed at runtime. Start it with `go run . serve` or the built executable and open `http://127.0.0.1:8080`. The server binds to loopback by default and has no authentication; keep it on a trusted local machine.
+
+## Configuration
+
+| Variable | Required | Description |
+| --- | --- | --- |
+| `NEO4J_URI` | yes | Bolt URI, for example `bolt://localhost:7687`. |
+| `NEO4J_USERNAME` | yes | Neo4j user. |
+| `NEO4J_PASSWORD` | yes | Neo4j password. |
+| `NEO4J_DATABASE` | no | Database name; defaults to the server's default database. |
+| `HTTP_ADDR` | no | Listen address for `serve` (also `--addr`). Default `127.0.0.1:8080`; the container image sets `0.0.0.0:8080`. |
+| `ACCESS_ANOMALY_INTERVAL` | no | How often access anomalies are recomputed. Default `15m`; `0` disables. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | no | OTLP/HTTP collector, for example `http://localhost:4318`. Unset logs to stdout only. |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | no | Logs-specific URL; overrides the general endpoint. |
+| `OTEL_LOGS_EXPORTER` | no | Set to `none` to disable OTLP export. |
+| `OTEL_SERVICE_NAME` | no | Service name on exported log records. |
+
+### Logging
+
+HTTP requests are always logged as JSON to stdout. When an OTLP endpoint is set, log records are also exported over OTLP/HTTP (to `/v1/logs` by default); standard OTLP header, TLS, timeout, and compression variables are supported.
+
+Each log includes the method, route template, response status, duration, response size, and JSON bodies of `POST`/`PATCH` requests up to 8 KiB. Route templates are logged instead of raw paths so record IDs are not. Common password, token, secret, authorization, API-key, and cookie fields are redacted, and invalid or oversized bodies are omitted. Request bodies may still contain personal or business data, so configure log retention and access accordingly.
+
+## Web dashboard
+
+### Signed-in user
+
+In the final rollout users sign in with Entra ID single sign-on, and what they can see follows from who they are. Until then the dashboard mocks sign-in:
+
+- The user at the top of the rail is the **Platform Super Admin**, a development account with access to every view.
+- The super admin can **act as** any configured identity (remembered for the browser session). The whole portal then follows that identity -- its Home page, its Workflow Tasks queue, and the default requester on the Access Request Form -- until **Back to super admin**.
+- Every user lands on **Home**: their profile (department, location, job codes, groups, and the roles and entitlements they hold through birthrights, roles, or direct permissions), the work waiting on them (pending approvals and tasks, which open straight into the task dialog), and their open requests.
+- The super admin's Home lists every open task and request on the platform instead. The super admin does not act on tasks directly but switches to an eligible identity to do so.
+
+Anthos platform entitlements (for example `IAA-identities-read`, `CAT-incidents-admin`, `CREQ-accessrequestform-use`) control which tools an identity can use. The dashboard sends `X-Actor-Id` on every API call. The platform super admin (or a missing header, for local CLI tools) has full access; when acting as an identity, that identity's held entitlements (birthright, role includes, or direct permissions) resolve to capabilities that gate both the UI and the matching API routes. `GET /api/capabilities` returns the resolved set.
+
+### Forms and pickers
+
+- Forms use named fields for identifiers, names, department, and location. **Add attribute** adds other scalar properties (text, numbers, or booleans); relationship forms provide typed endpoints and optional attributes.
+- Record pickers (RACI, incident assignment, affected CIs) are typeahead finders: type part of a name or ID and choose from the closest matches.
+- Lists read 50 records at a time.
+
+## HTTP API
+
+The dashboard uses the same API as external clients. Interactive Swagger UI is at `http://127.0.0.1:8080/api/docs`, and the OpenAPI 3.1 document is at `/api/openapi.yaml` (Swagger UI assets are served locally with the embedded frontend).
 
 ```text
-Identity -[HAS_JOB_CODE]-> JobCode
-Group -[MEMBER]-> Identity
-JobCode -[QUALIFIES_FOR]-> Birthright
-Birthright -[GRANTS]-> Role or Entitlement
-Role -[INCLUDES]-> Entitlement
+GET, POST           /api/nodes/{kind}
+GET, PATCH, DELETE  /api/nodes/{kind}/{id}
+GET, POST           /api/relationships/{kind}
+GET, PATCH, DELETE  /api/relationships/{kind}/{fromId}/{toId}
+GET, POST           /api/workflows
+GET, PUT, DELETE    /api/workflows/{id}
+GET                 /api/tasks
+GET                 /api/tasks/{id}
+POST                /api/tasks/{id}/actions
+GET                 /api/access-options
+POST                /api/access-requests
+GET                 /api/access-anomalies
+POST                /api/access-anomalies/refresh
+GET                 /api/capabilities
+GET                 /api/meta
+GET                 /api/openapi.yaml
+GET                 /api/docs
+GET                 /api/health
 ```
 
-Node IDs are generated by the server when records are created; for `job-code`, the generated ID is stored as the `code` property. Supply an existing ID only for get, update, retire, or relationship operations. Identity attributes and other metadata are flat string, boolean, or numeric properties. Stable keys and lifecycle properties are managed by the application.
+- **Retirement:** `DELETE` marks a node or relationship retired; it never physically deletes it. Add `?includeRetired=true` to list/get requests to see retired records.
+- **Paging:** pass `?limit=` (1-500) and `?offset=`, and read `X-Total-Count` / `X-Active-Count` from the response. Omit `limit` to read everything.
+- **Search and filters:** `?q=` searches across a record's properties. The request list also accepts `?involvedId=` (requests an identity raised or that are for it) and `?requestType=vendor|access`.
+- **Relationships in node responses:** a node list includes a sample of each node's directly attached relationships (at most 200 per node); `GET /api/nodes/{kind}/{id}` returns the full set.
+- **Metadata:** `GET /api/meta` publishes the node and relationship kinds, forward and inverse labels, enums, and form/workflow definitions referenced throughout this README.
 
-## CMDB model
-
-Identifiers for every node kind are generated by the server; callers cannot provide IDs during creation. Generated IDs use kind-specific prefixes such as `IDN-000001`, `JOB-000001`, `GRP-000001`, `CI-000001`, `INC-000001`, and `REQ-000001` (catalog requests, described below). Existing identifiers, including any longer ULID-style IDs created during a brief generator change, are unchanged. A `ci` record must have a `ciType` from the fixed, code-reviewed enum `server`, `printer`, `data-connector`, `application`, `service`, `process`, `function`, `location`, `contract`, or `vendor`. The `server`, `printer`, `data-connector`, and `application` types carry `name` and `description`; `application` additionally requires `hosted` set to `internal` or `external`. The `service`, `process`, and `function` types also require a `category` of `business`, `technology`, or `security` at creation, and carry `name` and `description` properties. The `location` type records a site: `name`, `siteId`, separate address properties (`addressLine1`, `addressLine2`, `city`, `state`, `postalCode`, `country`), an IANA `timezone`, and hours of operation stored per weekday as `hoursMonday` through `hoursSunday` with values like `08:00-17:00` or `closed` (a closing time at or before the opening time runs past midnight). The API validates and normalizes these values, and `cmdb.IsLocationOpenAt` evaluates whether a site is open at a given instant. When a location is created or its address changes, the server geocodes the address with the US Census Bureau geocoder (`internal/geocode`, no API key needed) and stores `latitude`, `longitude`, and `geoPrecision` (`address` for a street match, `state` when it falls back to the state's center, or `manual` when coordinates are supplied directly); geocoding failures never block a save. The dashboard's **Locations ? Location Maps** view plots these sites on a map of the United States including Alaska and Hawaii, coloured green when the site is currently open and grey when closed. The `contract` type carries `name`, `description`, and a required `contractType` of `basic-contract`, `msa`, or `nda`; contracts are the only CIs that can start a `governs` relationship. Every CI also carries a boolean `critical` flag (defaults to false) for whether the item itself is business-critical. The `vendor` type carries `name`, `description`, a required `criticality` of `critical`, `important`, or `business-support` (vendor ranking, separate from the `critical` flag), and optional contact details `contactName`, `contactPhone`, and `contactEmail` (the email is validated and lower-cased; the phone number is not free text ? it is normalized to `(555) 010-0100` for North American numbers or `+` and digits for international ones, and anything that is not a complete number is rejected); vendors start a `provides` relationship to the application, server, and printer CIs they supply. Adding a CI type or category requires a software change and redeployment; the API rejects unknown values. This POC has no authentication, so administrative governance is through the reviewed release process, not a runtime admin role.
-
-Every relationship is stored once, in its forward direction, and has a paired inverse label that describes the same edge from the other endpoint. `GET /api/meta` returns both labels for each kind, and the dashboard shows whichever applies to the record you are looking at (the record list, the Map inspector, and the Map edge labels for the selected node all switch between forward and inverse). The pairs are:
-
-| Forward (from ? to) | Inverse (as read from the `to` side) | Endpoints |
-| --- | --- | --- |
-| `has-job-code` | `job-code-for` | Identity ? Job code |
-| `work-location` | `work-location-for` | Identity ? Location CI |
-| `member` | `member-of` | Group ? Identity |
-| `drafted-request` | `drafted-request-for` | Identity ? Request (while the request is a draft) |
-| `form-submitted` | `submitted-by` | Identity ? Request (once the request is submitted) |
-| `requested-for` | `subject-of` | Request ? Identity (who an access request is for) |
-| `requests-access` | `requested-on` | Request ? Role or Entitlement (with `note`, `decision`, `decidedAt`, `decidedBy`, `fulfilledAt`) |
-| `has-step` | `step-of` | Workflow ? Workflow step |
-| `next-step` | `previous-step` | Workflow step ? Workflow step (the step that follows) |
-| `step-assigned-to` | `assigned-step` | Workflow step ? Identity or Group |
-| `run-for` | `has-run` | Workflow run ? Request |
-| `instance-of` | `has-instance` | Workflow run ? Workflow |
-| `task-for` | `has-task` | Task ? Workflow run |
-| `task-step` | `step-task` | Task ? Workflow step |
-| `task-item` | `item-task` | Task ? Role or Entitlement (the one item an access task decides or provisions) |
-| `task-assigned-to` | `assigned-task` | Task ? Identity or Group |
-| `acted-by` | `acted-on` | Task ? Identity (with `action`, `comment`, `actedAt`) |
-| `fulfilled-by` | `fulfills` | Request ? CI created from it |
-| `qualifies-for` | `qualified-by` | Job code ? Birthright |
-| `grants` | `granted-by` | Birthright ? Role or Entitlement |
-| `includes` | `included-by` | Role ? Entitlement |
-| `has-role` | `role-for` | Application CI ? Role (a role is for one application; what the Access Request Form offers) |
-| `entitled-by` | `entitlement-for` | Application CI ? Entitlement (an entitlement is for one application; what the Access Request Form offers) |
-| `permissions` | `permissioned-by` | Role or Entitlement ? Identity (direct access granted outside a birthright; with `requestId`, `grantedAt`, `grantedBy`, `note`) |
-| `affects` | `affected-by` | Incident ? CI |
-| `changes` | `changed-by` | Change ? CI |
-| `assigned-to` | `assignee-of` | Incident ? Identity or Group |
-| `observed-on` | `observed` | Event ? CI |
-| `depends-on` | `depended-on-by` | CI (dependent) ? CI (dependency) |
-| `hosts` | `hosted-by` | CI (host) ? CI (hosted workload) |
-| `uses` | `used-by` | CI (consumer) ? CI (provider) |
-| `governs` | `governed-by` | Contract CI ? CI |
-| `provides` | `provided-by` | Service/Function CI ? Service/Function CI, or Vendor CI ? Application/Server/Printer CI |
-| `accountable` | `accountable-for` | CI, Job code, Birthright, Role, or Entitlement ? Identity |
-| `responsible` | `responsible-for` | CI, Job code, Birthright, Role, or Entitlement ? Identity or Group |
-| `consulted` | `consulted-on` | CI, Job code, Birthright, Role, or Entitlement ? Identity or Group |
-| `informed` | `informed-of` | CI, Job code, Birthright, Role, or Entitlement ? Identity or Group |
-
-CIs, job codes, birthrights, roles, and entitlements carry RACI ownership through the last four relationships (`GET /api/meta` lists these kinds as `raciKinds`). Their forms in the dashboard are split into a **Details** tab and a **RACI** tab: Accountable is a single identity, while Responsible, Consulted, and Informed accept any mix of identities and groups; saving the form creates or retires the matching relationships. Job codes, birthrights, roles, and entitlements also carry a `description`. Incidents carry an `assigned-to` link to the identity or group working them, managed by the "Assigned to" picker on the incident form in the same way. `GET /api/meta` reports `fromKinds` and `toKinds` for relationships whose endpoints may be more than one node kind. Record pickers in the dashboard (RACI, incident assignment, affected CIs) are typeahead finders: type part of a name or ID and choose from the closest matches rather than scrolling a full list.
-
-`provides` connects services and functions in either combination (a function provides a service, a service provides a function, or service to service), and a vendor provides the applications, servers, and printers it supplies (read from the application as `provided-by` the vendor). These pairings are enforced per rule, so a service cannot "provide" a server and a vendor cannot provide a service; `GET /api/meta` publishes them as `ciTypeRules` and the dashboard narrows the To list to match the chosen From record. `work-location` must end on a `location` CI; creating an identity with `ciIds` pointing at a location creates this link in the same request, which is what the dashboard's identity Location picker does. For example, `CI-000001 -[hosts]-> CI-000002` reads as "CI-000001 hosts CI-000002" from the host and "CI-000002 hosted-by CI-000001" from the workload. The former `hosted-on` and `used-by` relationship types were replaced by `hosts` and the inverse of `uses`; `servicemap init` rewrites any edges stored under the old types into the new forward direction. Likewise the former `business-process` CI type was renamed `process`, and `servicemap init` rewrites existing records to the new value.
+From PowerShell, build JSON and send it with `Invoke-RestMethod`:
 
 ```powershell
-$server = go run . node create --kind ci --properties '{"ciType":"server","name":"app-01"}' | ConvertFrom-Json
-$application = go run . node create --kind ci --properties '{"ciType":"application","name":"example-app"}' | ConvertFrom-Json
-$connector = go run . node create --kind ci --properties '{"ciType":"data-connector","name":"example-connector"}' | ConvertFrom-Json
-go run . node create --kind incident --ci-ids $server.id
-go run . relationship create --kind DEPENDS_ON --from-id $server.id --to-id $connector.id
-go run . node list --kind ci
+$body = @{ properties = @{ department = "Platform Engineering" } } | ConvertTo-Json -Depth 5
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8080/api/nodes/identity" -ContentType "application/json" -Body $body
 ```
 
-Incident and change creation requires one or more active CI IDs. Creation and linking are atomic: if any selected CI is missing or retired, the record is not created. Incidents also carry a boolean `nodeDown` flag (defaults to false) to mark that the affected node is currently unavailable. Events may optionally be linked to CIs. IDs remain required for get, update, and retire operations.
+## CLI
 
-### Catalog requests
+All successful commands print JSON to stdout; errors go to stderr with a non-zero exit code. Run `go run . --help` for syntax.
 
-Some CIs are introduced through a request workflow rather than created directly. A `request` record (`REQ-000001`?) captures the data for a CI before it exists; the first form is the **Vendor Request Form** (`requestType` of `vendor`), which asks for the vendor's `name`, `description`, and contact details (`contactName`, `contactPhone`, `contactEmail`). The request record keeps parity with the vendor CI; the difference is what is exposed to the initial requester, so `criticality` is left to whoever creates the CI. Requests are created in the `draft` state and may be saved incomplete, so a requester can come back to them later. Every request belongs to a requester: the form asks who the request is for and records it as `drafted-request` / `drafted-request-for` from that identity to the request. Submitting is done by updating `state` to `submitted`; the server checks the request carries what the requester must supply (vendor: `name`), stamps `submittedAt`, retires the `drafted-request` link and creates `form-submitted` / `submitted-by` from the same identity in one write. A draft with no active requester cannot be submitted, callers cannot move a request back to draft, and `submittedAt` is managed by the application. Submitted requests remain editable (an admin role for this is planned); the requester is fixed once submitted. `GET /api/meta` publishes `requestTypes` (`vendor`, `access`) and `requestStates` (`draft`, `submitted`, `in-review`, `fulfilled`, `denied`). The dashboard's **Catalog requests ? Vendor Request Form** view opens straight onto the form with every field ready for entry, offers **Save draft** and **Submit request**, and lists saved vendor requests beneath it so a draft can be reopened. Once a request has been submitted the form also shows its **Workflow progress**: each task the workflow raised, who it was assigned to, what they did, and whether the request SLA and step OLA are in or out of time.
-
-The platform super admin's Home page has a **holiday calendar**. Marked weekdays are closed for SLA and OLA counting (weekends are already skipped). SLA is configured on the workflow in Workflow Creator; the Vendor and Access Request Forms only display that the request has an SLA and how many business days it allows. Each workflow step can enable an OLA with its own business-day target; those values are stamped onto the task when it is raised. Task reviews show a filling circle for SLA and OLA that advances every 8 business hours from when the request or task starts (green while on track, yellow in the final 8-hour chunk, red when overdue, and a full green ring when met). Weekends and platform holidays do not move the meter.
-
-### Access requests
-
-An identity normally receives roles and entitlements through its job code's birthrights (`has-job-code` ? `qualifies-for` ? `grants`, and entitlements included by those roles via `includes`; a birthright may also `grants` an entitlement directly). The birthright form's **Roles** and **Entitlements** pickers reconcile those `grants` links on save; its **Job codes** picker reconciles `qualifies-for` from the other side (a birthright is typically 1:1 with a job code, but more than one is still allowed). The role form's **Included entitlements** picker reconciles `includes` the same way; role and entitlement forms also have **Direct assignments** for identities (`permissions` / `permissioned-by`); the job code form's **Birthrights** picker reconciles `qualifies-for`. Under the birthrights list, **Access anomalies** (`GET /api/access-anomalies`) calls out identities that hold the same role or entitlement through more than one path ? a birthright, a held role that `includes` the entitlement, and/or a direct `permissions` link. Because the check walks the whole access graph, the server recomputes it on a schedule (`ACCESS_ANOMALY_INTERVAL`, default `15m`; `0` disables it) and stores the result in the graph; the panel shows that snapshot and when it was taken, and a **Refresh** button (`POST /api/access-anomalies/refresh`) is only offered in development builds. The identity form's "Job code and birthrights" section sets job codes up on create and again when editing (for example when someone changes jobs): it takes the identity's job code and any birthrights they should hold. Because a birthright reaches an identity only through a job code, choosing one resolves the job code that `qualifies-for` it (asking which, if several do) and reconciles `has-job-code` links for the chosen job code and each resolved one (creating new links and retiring ones that no longer apply); a birthright no job code qualifies for yet cannot be chosen until that `qualifies-for` relationship exists. Access outside a birthright is an exception, raised on the **Catalog requests ? Access Request Form** and granted as a direct `permissions` / `permissioned-by` link from the role or entitlement to the identity. A role or entitlement is offered on the form when it belongs to an application CI ? `has-role` / `role-for` between the application and a role, `entitled-by` / `entitlement-for` between the application and an entitlement (the "Application" picker on its Details tab) and it has an Accountable owner on its RACI tab; items without either are hidden. The form asks who is **requesting** and who the access is **for**, then `GET /api/access-options?identityId=` lists, per application, the roles and entitlements that identity may ask for, leaving out anything it already holds through a birthright, through a role it holds (entitlements), directly, or on another open request (returned as `held`, with how). Any number of items across any number of applications may be ticked, each with an optional note for the approver. There is no draft: `POST /api/access-requests` creates the request (`requestType` `access`, state `in-review`, `form-submitted` from the requester, `requested-for` the subject, one `requests-access` link per item carrying the note and a `decision` of `pending`) and starts the access workflow in the same write. Creating an `access` request through `POST /api/nodes/request` is refused.
-
-The access workflow is a system workflow with a fixed shape, published by `GET /api/meta` as `accessWorkflowTemplate`: step 1 is an approval whose `assigneeRule` is `item-accountable`, and step 2 is a review (fulfilment) assigned to whoever provisions access, such as the `IAA-RequestFulfillment` group. In the Workflow Creator, choosing the Access Request Form loads this template with the steps locked ? only step 2's assignees, the names, and the instructions can be changed ? and the workflow must be enabled before access requests can be submitted (there is no seeded workflow; the API explains what to do if it is missing). On submission one approval task is raised per item, assigned to that item's Accountable (`task-item` names the item). The owner **approves** (decision `approved`; a fulfilment task for that item is raised at step 2 straight away, while the other items are still being decided) or **denies** with a reason (decision `denied`). The fulfilment team opens each approved item's task, provisions the access, and marks it provisioned: the server sets the decision to `fulfilled` and creates the `permissions` link stamped with `requestId`, `grantedAt`, `grantedBy`, and the note. Any item may be denied while the request stays active. When nothing is left pending or approved the request settles: `fulfilled` if at least one item was provisioned, `denied` if every item was refused, and either way the request, run, and tasks are retired as with vendor requests (the `permissions` links are the live record). Task views for access tasks carry `requestedFor`, the `item` the task is about, and `items` (every item on the request with its decision) so Workflow Tasks can show the whole picture; the Access Request Form lists every access request with each item's decision and the task trail.
-
-### Workflows
-
-Submitting a form starts a workflow when one is enabled for that form. Workflows are built in **Catalog requests ? Workflow Creator**, which lists every saved workflow beneath its form (reopen one to edit it; retired workflows appear under "Include retired", read in full, and can be copied into a new workflow), and stored in the graph: a `workflow` (`WFL-000001`?) has ordered `workflow-step` records (`STP-?`) linked with `has-step` / `step-of` and chained with `next-step` / `previous-step`; each step is assigned to identities or groups with `step-assigned-to` / `assigned-step`. A step is either a **review** (assignees look the form over, fill in the fields the step exposes, and complete it) or an **approval** (assignees approve under the step's rule: `any` one approver, or `all` eligible approvers). For every step the admin picks which request fields are *editable* by its assignees and which of those are *required* before the step can be completed or approved. At most one workflow per form may be enabled, and an enabled workflow must require every property the target CI needs that the requester does not supply (vendor: `criticality`), so a run can never dead-end. Steps run in order today; `order` and the `next-step` chain are kept so parallel branches can be added later.
-
-When a request with an enabled workflow is submitted the server creates a `workflow-run` (`RUN-?`, `run-for` the request, `instance-of` the workflow), sets the request to `in-review`, and raises a `task` (`TSK-?`) for the first step (`task-for` the run, `task-step` the step, `task-assigned-to` copied from the step). Tasks are worked in **Catalog requests ? Workflow Tasks** (and from the signed-in user's Home page): the queue follows the signed-in user, listing the tasks assigned to that identity or to a group it is a member of, and the user opens one to see the request, enter the step's editable fields, and **Complete** / **Approve** or **Return to requester** with a comment. Every action is recorded as `acted-by` from the task to the identity (with `action`, `comment`, and `actedAt`). Completing a step raises the next step's task; completing the last step creates the CI from the request (vendor fields copied across), links `fulfilled-by` / `fulfills` from the request to the new CI, sets the request to `fulfilled`, and then retires the request, the run, and every task of the run (with their attached relationships, except the `fulfilled-by` link so the CI still reads where it came from), all in one write: the CI is the live record, and the closed-out request and tasks remain readable as history under "Include retired" / `includeDone=true`. The workflow definition and its steps are untouched. Runs and tasks can also be retired by hand once they are finished: **Catalog requests ? Workflow Runs** lists runs with a Retire action (`DELETE /api/nodes/workflow-run/{id}`, which retires the run and its tasks; an active run is refused), and Workflow Tasks offers Retire on completed, approved, or rejected tasks (`DELETE /api/nodes/task/{id}`; a pending task is refused). Returning a request marks the task `rejected`, the run `returned`, and the request `draft` again with `returnComment` / `returnedAt` set and the `drafted-request` link restored, so the requester can fix it and resubmit; resubmitting starts a fresh run. The API is `GET/POST /api/workflows`, `GET/PUT/DELETE /api/workflows/{id}`, `GET /api/tasks?actorId=&requestId=&includeDone=`, `GET /api/tasks/{id}`, and `POST /api/tasks/{id}/actions`; `GET /api/meta` publishes `requestFields`, `fulfilmentFields`, `stepTypes`, `approvalRules`, and `taskActions`. Workflow records are read-only through `/api/nodes/{kind}` and appear on the Map.
-
-## Commands
-
-Create the sample identity and access graph:
+Create a sample identity and access graph:
 
 ```powershell
 $identity1 = go run . node create --kind identity --properties '{"department":"Platform Engineering"}' | ConvertFrom-Json
@@ -144,7 +261,18 @@ go run . relationship create --kind INCLUDES --from-id $role.id --to-id $monitor
 go run . relationship create --kind INCLUDES --from-id $role.id --to-id $cloudAdmin.id
 ```
 
-Read, list, and update records:
+Create CIs and link them:
+
+```powershell
+$server = go run . node create --kind ci --properties '{"ciType":"server","name":"app-01"}' | ConvertFrom-Json
+$application = go run . node create --kind ci --properties '{"ciType":"application","name":"example-app"}' | ConvertFrom-Json
+$connector = go run . node create --kind ci --properties '{"ciType":"data-connector","name":"example-connector"}' | ConvertFrom-Json
+go run . node create --kind incident --ci-ids $server.id
+go run . relationship create --kind DEPENDS_ON --from-id $server.id --to-id $connector.id
+go run . node list --kind ci
+```
+
+Read, list, and update:
 
 ```powershell
 go run . node get --kind identity --id $identity1.id
@@ -153,9 +281,11 @@ go run . node update --kind identity --id $identity1.id --properties '{"location
 go run . relationship list --kind HAS_JOB_CODE
 ```
 
-`node list` includes a sample of each node's directly attached supported relationships (at most 200 per node; `node get` returns them all). It does not expand the full graph; use separate relationship lists to inspect other parts of the access chain. By default, retired relationships are omitted, and `--include-retired` includes them.
+`node list` includes a sample of each node's directly attached relationships (at most 200 per node; `node get` returns them all). It does not expand the full graph; use relationship lists to inspect other parts of the access chain. Retired relationships are omitted unless you pass `--include-retired`.
 
-Retirement replaces deletion. Retiring a node marks that node and its directly attached relationships as retired in one transaction. It does not retire neighboring nodes or their other relationships. Retired records are hidden from normal reads; add `--include-retired` to inspect them. There is no physical delete or reactivation command. In the graph, every node carries `status` (`active` or `retired`, indexed per label), and a retired relationship is moved from its live type to a `<TYPE>_RETIRED` type with the same direction and properties (for example `HAS_JOB_CODE_RETIRED`), so live traversals never scan retired edges while history reads union both. `servicemap serve` and `servicemap init` apply the constraints, indexes, and one-time migrations (status backfill, retired-edge move) at startup, recording each migration as a `CMDBMigration` node so it runs once.
+### Retirement
+
+Retirement replaces deletion; there is no physical delete or reactivation command.
 
 ```powershell
 go run . node retire --kind identity --id $identity1.id
@@ -163,92 +293,191 @@ go run . node get --kind identity --id $identity1.id --include-retired
 go run . relationship get --kind HAS_JOB_CODE --from-id $identity1.id --to-id $jobCode.id --include-retired
 ```
 
-All successful commands print JSON to standard output; errors go to standard error and return a non-zero exit code. Run `go run . --help` for command syntax.
+- Retiring a node retires that node and its directly attached relationships in one transaction. Neighboring nodes and their other relationships are untouched.
+- Every node carries `status` (`active` or `retired`, indexed per label). A retired relationship moves from its live type to a `<TYPE>_RETIRED` type with the same direction and properties (for example `HAS_JOB_CODE_RETIRED`), so live traversals never scan retired edges while history reads union both.
+- `serve` and `init` apply constraints, indexes, and one-time migrations (status backfill, retired-edge move) at startup, recording each migration as a `CMDBMigration` node so it runs once.
 
-## Web dashboard and API
+## Data model
 
-For local development, configure Neo4j as above, then run the Go API and Vite in separate PowerShell terminals from the repository root. Vite proxies `/api` requests to the Go server:
+### Identifiers and properties
 
-```powershell
-go run . serve
-```
+- IDs for every node kind are generated by the server; callers cannot supply them on create. Supply an existing ID only for get, update, retire, or relationship operations.
+- Generated IDs use kind-specific prefixes such as `IDN-000001`, `JOB-000001`, `GRP-000001`, `CI-000001`, `INC-000001`, `REQ-000001`, `WFL-000001`, `STP-...`, `RUN-...`, and `TSK-...`. Existing IDs, including longer ULID-style IDs created during a brief generator change, are unchanged.
+- For `job-code`, the generated ID is stored as the `code` property.
+- Attributes are flat string, boolean, or numeric properties. Stable keys and lifecycle properties are managed by the application.
 
-```powershell
-Push-Location web
-npm ci
-npm run dev
-```
+### Identity and access
 
-Open `http://127.0.0.1:5173`. The Vite dev server proxies API requests to `http://127.0.0.1:8080`.
-
-### Signed-in user
-
-In the final rollout users sign in with Entra ID single sign-on and what they can see follows from who they are. Until then the dashboard mocks the sign-in: the user shown at the top of the rail is the **Platform Super Admin**, a development account with access to every view. Opening it shows who is signed in and lets the super admin **act as** any configured identity (remembered for the browser session); the whole portal then follows that identity ? its Home page, its task queue under Workflow Tasks, and the default requester on the Access Request Form ? until **Back to super admin**. Every user lands on **Home**: their profile (department, location, job codes, groups, and the roles and entitlements they hold through birthrights, roles, or direct permissions) followed by the work waiting on them (pending approvals and tasks, which open straight into the task dialog) and their open requests. The super admin's Home lists every open task and request on the platform instead; the super admin does not act on tasks directly but switches to an eligible identity to do so. Anthos platform entitlements (for example `IAA-identities-read`, `CAT-incidents-admin`, `CREQ-accessrequestform-use`) now control which tools an identity can use. The dashboard sends `X-Actor-Id` on every API call: the platform super admin (or a missing header for local CLI tools) has full access; when acting as an identity, that identity's held entitlements (birthright, role includes, or direct permissions) are resolved to capabilities that gate both the nav/actions in the UI and the matching API routes (`GET /api/capabilities` returns the resolved set).
-
-For production, build the frontend before building Go:
-
-```powershell
-Push-Location web
-npm ci
-npm run build
-Pop-Location
-go build -o cmdb.exe .
-```
-
-Vite writes the built React app to `internal/httpapi/static`, where Go embeds and serves it. Node.js is not needed to run the production Go binary. Start it with `go run . serve` or the built executable, then open `http://127.0.0.1:8080`. To use a different listen address, pass `--addr` or set `HTTP_ADDR`. The server binds to loopback by default and has no authentication; keep it on a trusted local machine.
-
-HTTP requests are logged as JSON to stdout. To also export OpenTelemetry log records over OTLP/HTTP, configure a collector endpoint before starting the server:
-
-```powershell
-$env:OTEL_SERVICE_NAME = "servicemap-graph-poc"
-$env:OTEL_EXPORTER_OTLP_ENDPOINT = "http://localhost:4318"
-```
-
-The exporter sends to `/v1/logs` by default; `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` can specify a logs-specific URL. Standard OTLP headers, TLS, timeout, and compression environment variables are supported. Logs include method, route template, response status, duration, response size, and JSON bodies for `POST`/`PATCH` requests up to 8 KiB. Common password, token, secret, authorization, API-key, and cookie fields are redacted; invalid or oversized bodies are omitted. Request bodies may contain personal or business data, so configure log retention and access accordingly. Route templates are used instead of raw paths so record IDs are not logged. Leave the endpoint unset to log locally only, or set `OTEL_LOGS_EXPORTER=none` to disable OTLP export.
-
-The dashboard uses the same API as external clients:
+Node kinds: `identity`, `job-code`, `birthright`, `role`, `entitlement`, and `group`. Groups carry a `name` and `description`; job codes, birthrights, roles, and entitlements carry a `description`.
 
 ```text
-GET, POST       /api/nodes/{kind}
-GET, PATCH, DELETE /api/nodes/{kind}/{id}
-GET, POST       /api/relationships/{kind}
-GET, PATCH, DELETE /api/relationships/{kind}/{fromId}/{toId}
-GET, POST       /api/workflows
-GET, PUT, DELETE /api/workflows/{id}
-GET             /api/tasks
-GET             /api/tasks/{id}
-POST            /api/tasks/{id}/actions
-GET             /api/access-options
-POST            /api/access-requests
-GET             /api/access-anomalies
-POST            /api/access-anomalies/refresh
-GET             /api/meta
-GET             /api/openapi.yaml
-GET             /api/docs
-GET             /api/health
+Identity -[HAS_JOB_CODE]-> JobCode
+Group -[MEMBER]-> Identity
+JobCode -[QUALIFIES_FOR]-> Birthright
+Birthright -[GRANTS]-> Role or Entitlement
+Role -[INCLUDES]-> Entitlement
 ```
 
-Open interactive Swagger UI at `http://127.0.0.1:8080/api/docs`; the OpenAPI 3.1 document is served at `/api/openapi.yaml`. Swagger UI assets are hosted locally with the embedded frontend.
+An identity normally receives roles and entitlements through its job code's birthrights (`has-job-code` -> `qualifies-for` -> `grants`, plus entitlements included by those roles via `includes`; a birthright may also `grants` an entitlement directly). Access outside a birthright is an exception granted through an [access request](#access-requests).
 
-`DELETE` marks the node or relationship retired; it never physically deletes it. Add `?includeRetired=true` to list/get requests when you need retired records. List endpoints page: pass `?limit=` (1?500) and `?offset=`, and read `X-Total-Count` / `X-Active-Count` from the response for the matching totals; omit `limit` to read everything. `?q=` searches server-side across a record's properties, and the request list also accepts `?involvedId=` (requests an identity raised or that are for it) and `?requestType=vendor|access`. A node-list response includes a bounded sample of each node's directly attached supported relationships (200 per node); `GET /api/nodes/{kind}/{id}` returns the full set. The dashboard lists read 50 records at a time.
+Form pickers reconcile these links on save (creating new links and retiring ones that no longer apply):
 
-Dashboard forms use named fields for node identifiers, names, department, and location. Use **Add attribute** for other scalar properties; relationship forms provide typed endpoints and optional attributes. Attributes can be text, numbers, or booleans.
+| Form | Picker | Relationship |
+| --- | --- | --- |
+| Group | **Members** | `member` |
+| Job code | **Birthrights** | `qualifies-for` |
+| Birthright | **Job codes** | `qualifies-for` (typically 1:1, but more than one is allowed) |
+| Birthright | **Roles**, **Entitlements** | `grants` |
+| Role | **Included entitlements** | `includes` |
+| Role, Entitlement | **Direct assignments** | `permissions` to identities |
+| Identity | **Location** | `work-location` |
+| Identity | **Job code and birthrights** | `has-job-code` |
 
-For PowerShell scripts, construct JSON and send it with `Invoke-RestMethod` rather than passing JSON as an argument to `go run`:
+The identity form's **Job code and birthrights** section is used on create and again when someone changes jobs. Because a birthright reaches an identity only through a job code, choosing a birthright resolves the job code that `qualifies-for` it (asking which, if several do) and reconciles `has-job-code` for the chosen and resolved job codes. A birthright no job code qualifies for cannot be chosen until that `qualifies-for` link exists.
 
-```powershell
-$body = @{ properties = @{ department = "Platform Engineering" } } | ConvertTo-Json -Depth 5
-Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8080/api/nodes/identity" -ContentType "application/json" -Body $body
-```
+**Access anomalies** (`GET /api/access-anomalies`, shown under the birthrights list) calls out identities that hold the same role or entitlement through more than one path: a birthright, a held role that `includes` the entitlement, and/or a direct `permissions` link. Because the check walks the whole access graph, the server recomputes it on a schedule (`ACCESS_ANOMALY_INTERVAL`) and stores the result in the graph; the panel shows that snapshot and when it was taken. The **Refresh** button (`POST /api/access-anomalies/refresh`) is only offered in development builds.
+
+### Configuration items
+
+A `ci` record must have a `ciType` from a fixed, code-reviewed enum. Adding a type or category requires a software change and redeployment; the API rejects unknown values. Every CI also carries a boolean `critical` flag (default false) for whether the item itself is business-critical.
+
+| `ciType` | Properties |
+| --- | --- |
+| `server`, `printer`, `data-connector` | `name`, `description` |
+| `application` | `name`, `description`, `hosted` (required: `internal` or `external`) |
+| `service`, `process`, `function` | `name`, `description`, `category` (required at creation: `business`, `technology`, or `security`) |
+| `location` | `name`, `siteId`, `addressLine1`, `addressLine2`, `city`, `state`, `postalCode`, `country`, `timezone` (IANA), `hoursMonday` ... `hoursSunday` |
+| `contract` | `name`, `description`, `contractType` (required: `basic-contract`, `msa`, or `nda`) |
+| `vendor` | `name`, `description`, `criticality` (required: `critical`, `important`, or `business-support`), `contactName`, `contactPhone`, `contactEmail` |
+
+**Locations.** Hours are stored per weekday as values like `08:00-17:00` or `closed`; a closing time at or before the opening time runs past midnight. The API validates and normalizes these, and `cmdb.IsLocationOpenAt` evaluates whether a site is open at a given instant. When a location is created or its address changes, the server geocodes it with the US Census Bureau geocoder (`internal/geocode`, no API key needed) and stores `latitude`, `longitude`, and `geoPrecision` (`address` for a street match, `state` when it falls back to the state's center, or `manual` when coordinates are supplied directly). Geocoding failures never block a save. **Locations > Location Maps** plots sites on a US map (including Alaska and Hawaii), green when currently open and grey when closed.
+
+**Vendors.** `criticality` is a vendor ranking, separate from the `critical` flag. `contactEmail` is validated and lower-cased. `contactPhone` is not free text: it is normalized to `(555) 010-0100` for North American numbers or `+` and digits for international ones, and incomplete numbers are rejected.
+
+**Incidents, changes, and events.** Incident and change creation requires one or more active CI IDs; creation and linking are atomic, so if any CI is missing or retired the record is not created. Incidents carry a boolean `nodeDown` flag (default false) marking the affected node as unavailable, and an `assigned-to` link to the identity or group working them (the incident form's **Assigned to** picker). Events may optionally be linked to CIs.
+
+This POC has no authentication, so administrative governance is through the reviewed release process, not a runtime admin role.
+
+### Relationships
+
+Every relationship is stored once, in its forward direction, and has a paired inverse label describing the same edge from the other endpoint. `GET /api/meta` returns both labels, plus `fromKinds` and `toKinds` for relationships whose endpoints may be more than one kind. The dashboard shows whichever label applies to the record you are viewing (in the record list, the Map inspector, and the Map edge labels for the selected node). For example, `CI-000001 -[hosts]-> CI-000002` reads as "CI-000001 hosts CI-000002" from the host and "CI-000002 hosted-by CI-000001" from the workload.
+
+| Forward (from -> to) | Inverse (read from the `to` side) | Endpoints |
+| --- | --- | --- |
+| `has-job-code` | `job-code-for` | Identity -> Job code |
+| `work-location` | `work-location-for` | Identity -> Location CI |
+| `member` | `member-of` | Group -> Identity |
+| `qualifies-for` | `qualified-by` | Job code -> Birthright |
+| `grants` | `granted-by` | Birthright -> Role or Entitlement |
+| `includes` | `included-by` | Role -> Entitlement |
+| `has-role` | `role-for` | Application CI -> Role (a role belongs to one application) |
+| `entitled-by` | `entitlement-for` | Application CI -> Entitlement (an entitlement belongs to one application) |
+| `permissions` | `permissioned-by` | Role or Entitlement -> Identity (direct access outside a birthright; with `requestId`, `grantedAt`, `grantedBy`, `note`) |
+| `drafted-request` | `drafted-request-for` | Identity -> Request (while the request is a draft) |
+| `form-submitted` | `submitted-by` | Identity -> Request (once submitted) |
+| `requested-for` | `subject-of` | Request -> Identity (who an access request is for) |
+| `requests-access` | `requested-on` | Request -> Role or Entitlement (with `note`, `decision`, `decidedAt`, `decidedBy`, `fulfilledAt`) |
+| `fulfilled-by` | `fulfills` | Request -> CI created from it |
+| `has-step` | `step-of` | Workflow -> Workflow step |
+| `next-step` | `previous-step` | Workflow step -> the step that follows |
+| `step-assigned-to` | `assigned-step` | Workflow step -> Identity or Group |
+| `run-for` | `has-run` | Workflow run -> Request |
+| `instance-of` | `has-instance` | Workflow run -> Workflow |
+| `task-for` | `has-task` | Task -> Workflow run |
+| `task-step` | `step-task` | Task -> Workflow step |
+| `task-item` | `item-task` | Task -> Role or Entitlement (the item an access task decides or provisions) |
+| `task-assigned-to` | `assigned-task` | Task -> Identity or Group |
+| `acted-by` | `acted-on` | Task -> Identity (with `action`, `comment`, `actedAt`) |
+| `affects` | `affected-by` | Incident -> CI |
+| `changes` | `changed-by` | Change -> CI |
+| `assigned-to` | `assignee-of` | Incident -> Identity or Group |
+| `observed-on` | `observed` | Event -> CI |
+| `depends-on` | `depended-on-by` | CI (dependent) -> CI (dependency) |
+| `hosts` | `hosted-by` | CI (host) -> CI (hosted workload) |
+| `uses` | `used-by` | CI (consumer) -> CI (provider) |
+| `governs` | `governed-by` | Contract CI -> CI (only contracts can start `governs`) |
+| `provides` | `provided-by` | Service/Function CI -> Service/Function CI, or Vendor CI -> Application/Server/Printer CI |
+| `accountable` | `accountable-for` | CI, Job code, Birthright, Role, or Entitlement -> Identity |
+| `responsible` | `responsible-for` | CI, Job code, Birthright, Role, or Entitlement -> Identity or Group |
+| `consulted` | `consulted-on` | CI, Job code, Birthright, Role, or Entitlement -> Identity or Group |
+| `informed` | `informed-of` | CI, Job code, Birthright, Role, or Entitlement -> Identity or Group |
+
+**RACI.** CIs, job codes, birthrights, roles, and entitlements (`raciKinds` in `GET /api/meta`) carry ownership through the last four relationships. Their dashboard forms have a **Details** tab and a **RACI** tab: Accountable is a single identity, while Responsible, Consulted, and Informed accept any mix of identities and groups. Saving the form creates or retires the matching relationships.
+
+**CI type rules.** `provides` connects services and functions in any combination, and a vendor provides the applications, servers, and printers it supplies. These pairings are enforced per rule (a service cannot provide a server, and a vendor cannot provide a service); `GET /api/meta` publishes them as `ciTypeRules`, and the dashboard narrows the To list to match the chosen From record. `work-location` must end on a `location` CI; creating an identity with `ciIds` pointing at a location creates the link in the same request.
+
+**Migrations.** The former `hosted-on` and `used-by` types were replaced by `hosts` and the inverse of `uses`, and the former `business-process` CI type was renamed `process`. `init` rewrites existing edges and records to the new forms.
+
+## Catalog requests and workflows
+
+`GET /api/meta` publishes `requestTypes` (`vendor`, `access`) and `requestStates` (`draft`, `submitted`, `in-review`, `fulfilled`, `denied`).
+
+### Vendor requests
+
+Some CIs are introduced through a request rather than created directly. A `request` record captures the data for a CI before it exists. The **Vendor Request Form** (`requestType` `vendor`) asks for the vendor's `name`, `description`, and contact details. The request mirrors the vendor CI's fields, but `criticality` is left to whoever creates the CI.
+
+- Requests start in `draft` and may be saved incomplete. The form asks who the request is for and records it as `drafted-request` from that identity.
+- Submitting sets `state` to `submitted`. The server checks the requester supplied what they must (vendor: `name`), stamps `submittedAt`, and replaces `drafted-request` with `form-submitted` from the same identity, in one write.
+- A draft with no active requester cannot be submitted, callers cannot move a request back to draft, and `submittedAt` is managed by the application.
+- Submitted requests remain editable (an admin role for this is planned); the requester is fixed once submitted.
+
+**Catalog requests > Vendor Request Form** opens straight onto the form with **Save draft** and **Submit request**, and lists saved vendor requests beneath it so a draft can be reopened. Once submitted, the form also shows **Workflow progress**: each task raised, who it was assigned to, what they did, and whether the request SLA and step OLA are in or out of time.
+
+### Access requests
+
+Access outside a birthright is raised on **Catalog requests > Access Request Form** and granted as a direct `permissions` link from the role or entitlement to the identity.
+
+- **What is offered:** a role or entitlement appears when it belongs to an application CI (`has-role` / `entitled-by`, set by the **Application** picker on its Details tab) and has an Accountable owner on its RACI tab. Items without both are hidden.
+- **Choosing items:** the form asks who is **requesting** and who the access is **for**. `GET /api/access-options?identityId=` then lists, per application, what that identity may request, leaving out anything already held through a birthright, a held role, directly, or on another open request (returned as `held`, with how). Any number of items across applications may be ticked, each with an optional note for the approver.
+- **Submitting:** there is no draft. `POST /api/access-requests` creates the request (`requestType` `access`, state `in-review`, `form-submitted` from the requester, `requested-for` the subject, one `requests-access` link per item with the note and a `decision` of `pending`) and starts the access workflow in the same write. Creating an `access` request through `POST /api/nodes/request` is refused.
+
+The access workflow is a system workflow with a fixed shape, published as `accessWorkflowTemplate` in `GET /api/meta`:
+
+1. **Approval**, with `assigneeRule` `item-accountable`. One approval task is raised per item, assigned to that item's Accountable (`task-item` names the item). The owner **approves** (decision `approved`, and a fulfilment task for that item is raised straight away while other items are still being decided) or **denies** with a reason (decision `denied`).
+2. **Review (fulfilment)**, assigned to whoever provisions access, such as the `IAA-RequestFulfillment` group. They provision the access and mark it provisioned; the server sets the decision to `fulfilled` and creates the `permissions` link stamped with `requestId`, `grantedAt`, `grantedBy`, and the note.
+
+In the Workflow Creator, choosing the Access Request Form loads this template with the steps locked; only step 2's assignees, the names, and the instructions can be changed. The workflow must be enabled before access requests can be submitted (none is seeded; the API explains what to do if it is missing).
+
+Any item may be denied while the request stays active. When nothing is left pending or approved the request settles -- `fulfilled` if at least one item was provisioned, `denied` if every item was refused -- and the request, run, and tasks are retired as with vendor requests; the `permissions` links are the live record. Access task views carry `requestedFor`, the task's `item`, and `items` (every item with its decision), and the Access Request Form lists every access request with each item's decision and task trail.
+
+### Workflows
+
+Submitting a form starts a workflow when one is enabled for it. Workflows are built in **Catalog requests > Workflow Creator**, which lists saved workflows beneath their form. Reopen one to edit it; retired workflows appear under "Include retired", read in full, and can be copied into a new workflow.
+
+**Definition.** A `workflow` has ordered `workflow-step` records linked with `has-step` and chained with `next-step`; each step is assigned to identities or groups with `step-assigned-to`. A step is either:
+
+- a **review**: assignees look the form over, fill in the fields the step exposes, and complete it; or
+- an **approval**: assignees approve under the step's rule, `any` one approver or `all` eligible approvers.
+
+For each step the admin picks which request fields its assignees can edit and which of those are required before the step can be completed or approved. At most one workflow per form may be enabled, and an enabled workflow must require every CI property the requester does not supply (vendor: `criticality`), so a run can never dead-end. Steps run in order today; `order` and the `next-step` chain are kept so parallel branches can be added later. The workflow definition is never changed by runs.
+
+**Runs and tasks.** When a request is submitted the server creates a `workflow-run` (`run-for` the request, `instance-of` the workflow), sets the request to `in-review`, and raises a `task` for the first step (`task-for` the run, `task-step` the step, `task-assigned-to` copied from the step).
+
+Tasks are worked in **Catalog requests > Workflow Tasks** and from the user's Home page. The queue lists tasks assigned to the signed-in identity or to a group it belongs to. The user opens a task, enters the step's editable fields, and chooses **Complete** / **Approve** or **Return to requester** with a comment. Every action is recorded as `acted-by` from the task to the identity (with `action`, `comment`, and `actedAt`).
+
+- **Completing a step** raises the next step's task.
+- **Completing the last step** creates the CI from the request, links `fulfilled-by` from the request to the CI, sets the request to `fulfilled`, and retires the request, run, and tasks (with their relationships, except `fulfilled-by`) in one write. The CI is the live record; the closed-out request and tasks remain readable under "Include retired" / `includeDone=true`.
+- **Returning a request** marks the task `rejected`, the run `returned`, and the request `draft` again with `returnComment` / `returnedAt` set and the `drafted-request` link restored. Resubmitting starts a fresh run.
+- **Retiring by hand:** **Catalog requests > Workflow Runs** retires finished runs and their tasks (`DELETE /api/nodes/workflow-run/{id}`; an active run is refused), and Workflow Tasks retires completed, approved, or rejected tasks (`DELETE /api/nodes/task/{id}`; a pending task is refused).
+
+Endpoints: `GET/POST /api/workflows`, `GET/PUT/DELETE /api/workflows/{id}`, `GET /api/tasks?actorId=&requestId=&includeDone=`, `GET /api/tasks/{id}`, and `POST /api/tasks/{id}/actions`. `GET /api/meta` publishes `requestFields`, `fulfilmentFields`, `stepTypes`, `approvalRules`, and `taskActions`. Workflow records are read-only through `/api/nodes/{kind}` and appear on the Map.
+
+### SLA, OLA, and holidays
+
+- **SLA** is configured on the workflow in Workflow Creator, as a number of business days. The Vendor and Access Request Forms show that a request has an SLA and how many days it allows.
+- **OLA** can be enabled per workflow step with its own business-day target; the values are stamped onto each task when it is raised.
+- The platform super admin's Home page has a **holiday calendar**. Marked weekdays are excluded from SLA and OLA counting, as are weekends.
+- Task reviews show a filling circle for SLA and OLA that advances every 8 business hours from when the request or task starts: green while on track, yellow in the final 8-hour chunk, red when overdue, and a full green ring when met.
 
 ## Tests
-
-Run unit tests with:
 
 ```powershell
 go test ./...
 ```
 
+<<<<<<< HEAD
+The Neo4j retirement integration test is skipped unless `NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`, and `NEO4J_TEST_DATABASE` are set. It creates uniquely named records in that database and leaves them retired, so use a dedicated test database.
+=======
 The Neo4j retirement integration test is skipped unless `NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`, and `NEO4J_TEST_DATABASE` are set. It creates uniquely named records in that database and leaves them retired, so configure a dedicated test database rather than a production database.
 
 ## Performance tests
@@ -259,3 +488,4 @@ The Neo4j retirement integration test is skipped unless `NEO4J_URI`, `NEO4J_USER
 k6 run perf/smoke.js
 k6 run -e BASE_URL=http://127.0.0.1:8080 -e ACTOR_ID=platform-super-admin perf/smoke.js
 ```
+>>>>>>> 5ec9376678e7882802e7ea1e277f75d689d17945
