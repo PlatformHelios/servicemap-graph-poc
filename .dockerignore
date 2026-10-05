@@ -1,0 +1,10 @@
+.git
+.env
+*.exe
+*.test
+*.out
+perf/
+deploy/
+web/node_modules/
+web/public/swagger-ui/
+web/*.tsbuildinfo

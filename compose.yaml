@@ -1,14 +1,44 @@
-# Local development prerequisites for servicemap-graph-poc.
+# Local environment for servicemap-graph-poc.
 #
-#   podman compose up -d        (or: docker compose up -d)
+#   podman compose up -d                          prerequisites only; run the apps on the host
+#   podman compose --profile app up -d --build    prerequisites plus the api and web containers
 #
-# Then run the Go API and the Vite dev server on the host (see README "Local
-# environment"). The api/web services will be added here once they are
-# containerized; they should reach dependencies by service name (neo4j:7687,
-# otel-collector:4318, kafka:19092) rather than localhost.
+# (docker compose works the same way.) Containers reach each other by service
+# name (neo4j:7687, otel-collector:4318, kafka:19092), not localhost.
 name: servicemap
 
 services:
+  api:
+    profiles: [app]
+    build: .
+    image: localhost/servicemap-api:dev
+    environment:
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USERNAME: neo4j
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-your_password}
+      OTEL_SERVICE_NAME: servicemap-graph-poc
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+    ports:
+      - "127.0.0.1:8080:8080" # API, Swagger UI, and the embedded dashboard
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    restart: unless-stopped
+
+  web:
+    profiles: [app]
+    build: ./web
+    image: localhost/servicemap-web:dev
+    environment:
+      API_UPSTREAM: http://api:8080
+    ports:
+      - "127.0.0.1:8081:8080" # standalone dashboard, proxies /api to the api service
+    depends_on:
+      - api
+    restart: unless-stopped
+
   neo4j:
     image: docker.io/library/neo4j:2026.09.0
     environment:
