@@ -475,4 +475,17 @@ Endpoints: `GET/POST /api/workflows`, `GET/PUT/DELETE /api/workflows/{id}`, `GET
 go test ./...
 ```
 
+<<<<<<< HEAD
 The Neo4j retirement integration test is skipped unless `NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`, and `NEO4J_TEST_DATABASE` are set. It creates uniquely named records in that database and leaves them retired, so use a dedicated test database.
+=======
+The Neo4j retirement integration test is skipped unless `NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`, and `NEO4J_TEST_DATABASE` are set. It creates uniquely named records in that database and leaves them retired, so configure a dedicated test database rather than a production database.
+
+## Performance tests
+
+[k6](https://k6.io/docs/get-started/installation/) tests live in `perf/`. `perf/smoke.js` ramps 10 virtual users over read-only API endpoints and fails if more than 1% of requests fail or p95 latency exceeds 500 ms. Start the server, then run:
+
+```powershell
+k6 run perf/smoke.js
+k6 run -e BASE_URL=http://127.0.0.1:8080 -e ACTOR_ID=platform-super-admin perf/smoke.js
+```
+>>>>>>> 5ec9376678e7882802e7ea1e277f75d689d17945
