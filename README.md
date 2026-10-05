@@ -8,6 +8,38 @@ A Go application for managing identity/access and CMDB records in Neo4j. The Go 
 - Neo4j with Bolt connectivity enabled
 - Node.js 20.19+ or 22.12+ with npm (frontend development/build only)
 
+## Local environment
+
+`compose.yaml` brings up every prerequisite with Podman or Docker Compose; the Go API and the React dev server then run on the host.
+
+```powershell
+podman compose up -d      # or: docker compose up -d
+```
+
+| Service | Host port | Purpose |
+| --- | --- | --- |
+| `neo4j` | 7474 (browser), 7687 (Bolt) | Graph store. Password is `NEO4J_PASSWORD` from `.env` (see `.env.example`), default `your_password`. |
+| `otel-collector` | 4317 (gRPC), 4318 (HTTP) | Receives OTLP from the API and forwards logs to Loki (`deploy/otel-collector.yaml`). |
+| `loki` | 3100 | Log store, 24h retention (`deploy/loki.yaml`). |
+| `prometheus` | 127.0.0.1:9090 | Scrapes itself, the collector, and Loki (`deploy/prometheus.yml`). |
+| `grafana` | 3000 | Anonymous admin, with Loki and Prometheus data sources provisioned. |
+| `kafka` | 9092 | Single-node KRaft broker. Containers on the compose network use `kafka:19092`. |
+
+Data lives in named volumes; `podman compose down -v` removes it. With the stack running, start the API and dashboard in two terminals:
+
+```powershell
+$env:NEO4J_URI = "bolt://localhost:7687"; $env:NEO4J_USERNAME = "neo4j"; $env:NEO4J_PASSWORD = "your_password"
+$env:OTEL_SERVICE_NAME = "servicemap-graph-poc"; $env:OTEL_EXPORTER_OTLP_ENDPOINT = "http://localhost:4318"
+go run . init     # first run only
+go run . serve
+```
+
+```powershell
+cd web; npm install; npm run dev
+```
+
+The API logs appear in Grafana (http://localhost:3000) under the Loki data source as `{service_name="servicemap-graph-poc"}`.
+
 ## Configure the connection
 
 In PowerShell, set the connection environment variables for the current terminal:
