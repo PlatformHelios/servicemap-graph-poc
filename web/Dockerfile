@@ -15,4 +15,6 @@ FROM docker.io/nginxinc/nginx-unprivileged:1.29-alpine
 COPY nginx.conf.template /etc/nginx/templates/default.conf.template
 COPY --from=build /src/dist/ /usr/share/nginx/html/
 ENV API_UPSTREAM=http://api:8080
+# Exports NGINX_LOCAL_RESOLVERS from /etc/resolv.conf for the template's resolver.
+ENV NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1
 EXPOSE 8080

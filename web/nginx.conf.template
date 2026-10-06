@@ -2,8 +2,13 @@ server {
     listen 8080;
     root /usr/share/nginx/html;
 
+    # Resolve the API through the container's DNS on each request (cached 10s)
+    # so recreating the api container does not leave nginx on a stale address.
+    resolver ${NGINX_LOCAL_RESOLVERS} valid=10s;
+
     location /api/ {
-        proxy_pass ${API_UPSTREAM};
+        set $api_upstream ${API_UPSTREAM};
+        proxy_pass $api_upstream;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;

@@ -901,7 +901,7 @@ components:
       enum: [review, approval]
     ApprovalRule:
       type: string
-      description: For approval steps with several eligible approvers: the first approval satisfies the step (any), or every eligible approver must approve (all).
+      description: 'For approval steps with several eligible approvers: the first approval satisfies the step (any), or every eligible approver must approve (all).'
       enum: [any, all]
     TaskStatus:
       type: string
@@ -1060,7 +1060,7 @@ components:
             $ref: "#/components/schemas/Assignee"
         eligibleActors:
           type: array
-          description: Identities who may act on the task: direct assignees plus members of assigned groups.
+          description: 'Identities who may act on the task: direct assignees plus members of assigned groups.'
           items:
             $ref: "#/components/schemas/Assignee"
         actions:
