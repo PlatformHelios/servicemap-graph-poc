@@ -4,57 +4,35 @@ A Go application for managing identity/access and CMDB records in Neo4j. The Go 
 
 ## Quick start
 
-Run every command from the repository root. Examples use Podman; with Docker, replace `podman` with `docker`.
+### 1. Install Podman or Docker
 
-### 1. Install the prerequisites
+- [Podman](https://podman.io/docs/installation) with Compose (check with `podman compose version`), or
+- [Docker](https://docs.docker.com/get-docker/) with Compose v2 (check with `docker compose version`)
 
-- [Podman](https://podman.io/docs/installation) with Compose (`podman compose version`), or [Docker](https://docs.docker.com/get-docker/) with Compose v2
-- Free host ports 3000, 3100, 4317, 4318, 7474, 7687, 8080, 8081, 9090, and 9092. Stop any standalone Neo4j, OpenTelemetry collector, Loki, Grafana, Prometheus, or Kafka containers that already use them.
-- Only for [developing on the host](#develop-on-the-host): Go 1.26 or later, and Node.js 20.19+ or 22.12+ with npm
+The stack uses host ports 3000, 3100, 4317, 4318, 7474, 7687, 8080, 8081, 9090, and 9092. Stop anything already using them, such as standalone Neo4j, Grafana, or Kafka containers.
 
-### 2. Set environment variables
+### 2. Start the environment
 
-Compose reads `.env` from the repository root. It is optional; without it the defaults below apply.
-
-```powershell
-Copy-Item .env.example .env
-```
-
-| Variable | Default | Used for |
-| --- | --- | --- |
-| `NEO4J_PASSWORD` | `your_password` | Neo4j's initial password and the API's connection. At least 8 characters. Set it before the first start: Neo4j keeps the password it was created with until its volume is deleted. |
-
-The API container's other settings (Neo4j URI, OTLP endpoint, listen address) are preset in `compose.yaml`; see [Configuration](#configuration) for everything the API reads.
-
-### 3. Build the images
+From the repository root:
 
 ```powershell
-podman compose build
+podman compose up -d      # or: docker compose up -d
 ```
 
-This builds `api` (the Go API with the dashboard embedded) and `web` (the dashboard on nginx). The first build takes a few minutes.
+This pulls the newest published API and dashboard images from GitHub Container Registry (no login needed) along with Neo4j, the observability stack, and Kafka. The API waits for Neo4j to become healthy, which can take up to two minutes on a first start, and sets up the database itself.
 
-### 4. Start the environment
-
-```powershell
-podman compose up -d
-podman compose ps
-```
-
-The `api` container waits for Neo4j to report healthy (up to about two minutes on a first start) and applies the database schema itself; no separate `init` step is needed.
-
-### 5. Open it
+### 3. Open it
 
 | What | URL |
 | --- | --- |
 | Dashboard | http://127.0.0.1:8080 |
 | Swagger UI | http://127.0.0.1:8080/api/docs |
 | Grafana (API logs under the Loki data source) | http://localhost:3000 |
-| Neo4j Browser (user `neo4j`, password from step 2) | http://localhost:7474 |
+| Neo4j Browser (user `neo4j`, password `your_password`) | http://localhost:7474 |
 
-Stop with `podman compose down`; add `-v` to also delete the data. After code changes, rebuild and restart with `podman compose up -d --build`.
+Stop with `podman compose down`; add `-v` to also delete the data. Running `up -d` again always picks up the newest published API and dashboard images.
 
-To work on the code with live reload, run only the prerequisites in containers and the apps on the host; see [Develop on the host](#develop-on-the-host).
+To run your own code changes, see [Run in containers](#run-in-containers) (build the images locally) or [Develop on the host](#develop-on-the-host) (live reload).
 
 ## Contents
 
@@ -73,6 +51,8 @@ By default everything runs in containers. To work on the code with live reload, 
 
 ### Run in containers
 
+Running `up` with `--build` builds `api` and `web` from your working tree instead of using the published images:
+
 ```powershell
 podman compose up -d --build      # or: docker compose up -d --build
 ```
@@ -81,14 +61,14 @@ podman compose up -d --build      # or: docker compose up -d --build
 | --- | --- | --- |
 | `api` | 127.0.0.1:8080 | Go API with the dashboard embedded, plus Swagger UI at `/api/docs` (`Dockerfile`). Waits for Neo4j, applies the schema on startup, and exports logs to the collector. |
 | `web` | 127.0.0.1:8081 | Standalone dashboard served by nginx, proxying `/api` to the `api` service (`web/Dockerfile`). Can be deployed and scaled separately from the API. |
-| `neo4j` | 7474 (browser), 7687 (Bolt) | Graph store. Password is `NEO4J_PASSWORD` from `.env` (see `.env.example`), default `your_password`. |
+| `neo4j` | 7474 (browser), 7687 (Bolt) | Graph store. Password is the `NEO4J_PASSWORD` environment variable, default `your_password`. |
 | `otel-collector` | 4317 (gRPC), 4318 (HTTP) | Receives OTLP from the API and forwards logs to Loki (`deploy/otel-collector.yaml`). |
 | `loki` | 3100 | Log store, 24h retention (`deploy/loki.yaml`). |
 | `prometheus` | 127.0.0.1:9090 | Scrapes itself, the collector, and Loki (`deploy/prometheus.yml`). |
 | `grafana` | 3000 | Anonymous admin, with Loki and Prometheus data sources provisioned. |
 | `kafka` | 9092 | Single-node KRaft broker. Containers on the compose network use `kafka:19092`. |
 
-- **Rebuild after code changes:** run `podman compose up -d --build` again (or `podman compose up -d --build api web` for just the apps).
+- **Rebuild after code changes:** run `podman compose up -d --build` again (or `podman compose up -d --build api web` for just the apps). A plain `podman compose up -d` replaces local builds with the newest published images.
 - **Stop:** `podman compose down`. Data lives in named volumes; add `-v` to delete it.
 - **Logs:** `podman compose logs -f api`, or in Grafana under the Loki data source as `{service_name="servicemap-graph-poc"}`.
 - **CLI:** the API image's entrypoint is the binary, so CLI commands run against the stack with `podman compose exec api /servicemap node list --kind identity`.
@@ -108,7 +88,7 @@ podman run --rm -p 8081:8080 -e API_UPSTREAM=http://host.containers.internal:808
 
 #### Published images
 
-The [Container images](.github/workflows/images.yml) workflow builds both images on every pull request (without pushing) and pushes them to GitHub Container Registry:
+The [Container images](.github/workflows/images.yml) workflow builds both images on every pull request (without pushing) and pushes them to GitHub Container Registry. Both packages are public, so pulling needs no login:
 
 | Image | Tags |
 | --- | --- |
@@ -116,7 +96,6 @@ The [Container images](.github/workflows/images.yml) workflow builds both images
 | `ghcr.io/platformhelios/servicemap-web` | same as above |
 
 ```powershell
-podman login ghcr.io      # GitHub username and a token with read:packages
 podman pull ghcr.io/platformhelios/servicemap-api:latest
 ```
 
