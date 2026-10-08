@@ -1,4 +1,8 @@
 import type {
+  CatalogAnalysis,
+  CatalogAnalysisSummary,
+  CatalogItem,
+  CatalogOption,
   AccessAnomalyReport,
   AccessOptions,
   AccessRequestInput,
@@ -129,7 +133,7 @@ export interface ListQuery {
   offset?: number;
   q?: string;
   involvedId?: string;
-  requestType?: "vendor" | "access";
+  requestType?: "vendor" | "access" | "catalog";
 }
 
 function listQueryString(query: ListQuery): string {
@@ -296,6 +300,39 @@ export function createAccessRequest(input: AccessRequestInput): Promise<GraphNod
 
 export function getFormSLA(requestType: "vendor" | "access"): Promise<{ enabled: boolean; businessDays: number }> {
   return request<{ enabled: boolean; businessDays: number }>(`/api/form-sla?requestType=${encodeURIComponent(requestType)}`);
+}
+
+// Service Catalog items offered to the current actor.
+export function getCatalogItems(): Promise<CatalogItem[]> {
+  return request<CatalogItem[]>("/api/catalog-items");
+}
+
+export function getCatalogItem(id: string): Promise<CatalogItem> {
+  return request<CatalogItem>(`/api/catalog-items/${encodeURIComponent(id)}`);
+}
+
+// The CMDB records a picker field on a catalog form offers.
+export function getCatalogFieldOptions(itemId: string, field: string): Promise<CatalogOption[]> {
+  return request<CatalogOption[]>(`/api/catalog-items/${encodeURIComponent(itemId)}/options/${encodeURIComponent(field)}`);
+}
+
+// Raises a catalog request: it goes to the item's approvers, then the owning team's workflow.
+export function createCatalogRequest(input: { catalogItemId: string; requestedById?: string; inputs: Properties }): Promise<GraphNode> {
+  return request<GraphNode>("/api/catalog-requests", { method: "POST", body: JSON.stringify(input) });
+}
+
+// Workflow Analyzer: every visible item at a glance, one item in full, and a
+// draft manifest checked without publishing it.
+export function getCatalogAnalysisOverview(): Promise<CatalogAnalysisSummary[]> {
+  return request<CatalogAnalysisSummary[]>("/api/catalog-analysis");
+}
+
+export function getCatalogAnalysis(itemId: string): Promise<CatalogAnalysis> {
+  return request<CatalogAnalysis>(`/api/catalog-analysis/${encodeURIComponent(itemId)}`);
+}
+
+export function analyzeCatalogManifest(manifest: unknown): Promise<CatalogAnalysis> {
+  return request<CatalogAnalysis>("/api/catalog-analysis", { method: "POST", body: JSON.stringify(manifest) });
 }
 
 export function getHolidays(): Promise<Holiday[]> {

@@ -95,6 +95,11 @@ func TestRelationshipInverses(t *testing.T) {
 		RequestedFor:   "subject-of",
 		RequestsAccess: "requested-on",
 		TaskItem:       "item-task",
+		ForCatalogItem:  "has-catalog-request",
+		CatalogOwnedBy:  "owns-catalog-item",
+		VisibleTo:       "sees-catalog-item",
+		ApprovedThrough: "approves-catalog-item",
+		References:      "referenced-by",
 		Accountable:  "accountable-for",
 		Responsible:  "responsible-for",
 		Consulted:    "consulted-on",
@@ -335,10 +340,10 @@ func TestVendorRequestLifecycle(t *testing.T) {
 	if _, err := ParseNodeKind("request"); err != nil {
 		t.Fatal(err)
 	}
-	if names := RequestTypeNames(); strings.Join(names, ",") != "vendor,access" {
+	if names := RequestTypeNames(); strings.Join(names, ",") != "vendor,access,catalog" {
 		t.Errorf("RequestTypeNames() = %v", names)
 	}
-	if names := RequestStateNames(); strings.Join(names, ",") != "draft,submitted,in-review,fulfilled,denied" {
+	if names := RequestStateNames(); strings.Join(names, ",") != "draft,submitted,in-review,fulfilled,denied,in-progress,failed" {
 		t.Errorf("RequestStateNames() = %v", names)
 	}
 	if required := RequestRequiredProperties(VendorRequest); strings.Join(required, ",") != "name" {

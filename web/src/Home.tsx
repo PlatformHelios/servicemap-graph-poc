@@ -6,7 +6,7 @@ import { defaultPageSize } from "./Pager";
 import { titleCase } from "./RecordPicker";
 import { TaskDialog } from "./WorkflowTasks";
 import { formatWhen, requestStateOf, requestStatePillClass, requestTypeOf, taskStatusPillClass, formTitles } from "./workflows";
-import type { SessionUser } from "./session";
+import { superAdmin, type SessionUser } from "./session";
 import type { AccessHolding, GraphNode, Holiday, Metadata, TaskView } from "./types";
 
 // The signed-in user's landing page: who they are and the work waiting on
@@ -169,7 +169,7 @@ export default function Home({ user, metadata, reload, onNotify, onOpenRequest, 
       </div>
     </section>
 
-    {selected && <TaskDialog key={selected.id} task={selected} actorId={actorId} metadata={metadata} onClose={() => setSelected(null)} onOpenRequest={onOpenRequest} onDone={(message) => { setSelected(null); onNotify(message); setListReload((value) => value + 1); }} />}
+    {selected && <TaskDialog key={selected.id} task={selected} actorId={user.superAdmin ? superAdmin.id : actorId} metadata={metadata} onClose={() => setSelected(null)} onOpenRequest={onOpenRequest} onDone={(message) => { setSelected(null); onNotify(message); setListReload((value) => value + 1); }} />}
   </>;
 }
 

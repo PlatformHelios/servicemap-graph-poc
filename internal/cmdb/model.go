@@ -29,6 +29,10 @@ const (
 	WorkflowStep NodeKind = "workflow-step"
 	WorkflowRun  NodeKind = "workflow-run"
 	Task         NodeKind = "task"
+	// A catalog item is a self-service offering published by the team that
+	// automates it: the form (an input JSON Schema), who may see it, the
+	// approvals it needs, and the Temporal workflow that fulfils it.
+	CatalogItem NodeKind = "catalog-item"
 )
 
 // RequestType names the catalog form a request was raised from. Each type
@@ -42,6 +46,10 @@ const (
 	// and runs the fixed access workflow: one approval task per requested item
 	// to that item's Accountable, then a fulfilment task per approved item.
 	AccessRequest RequestType = "access"
+	// A catalog request is raised from a published catalog item. Its form is
+	// the item's input schema; approvals run as a workflow generated from the
+	// item, then the owning team's Temporal workflow fulfils it.
+	CatalogRequest RequestType = "catalog"
 )
 
 // RequestState is the lifecycle of a catalog request: drafts can be saved
@@ -57,7 +65,11 @@ const (
 	RequestSubmitted RequestState = "submitted"
 	RequestInReview  RequestState = "in-review"
 	RequestFulfilled RequestState = "fulfilled"
-	RequestDenied    RequestState = "denied" // every item of an access request was denied; the request retires
+	RequestDenied    RequestState = "denied" // every item of an access request was denied, or a catalog approver said no; the request retires
+	// Catalog requests only: approvals are done and the team's automation is
+	// running, or it ran and failed (the request stays open for the team).
+	RequestInProgress RequestState = "in-progress"
+	RequestFailed     RequestState = "failed"
 )
 
 // StepType is what a workflow step asks of its assignees: a review completes
@@ -191,6 +203,7 @@ var nodeSpecs = map[NodeKind]nodeSpec{
 	WorkflowStep: {label: "WorkflowStep", key: "id"},
 	WorkflowRun:  {label: "WorkflowRun", key: "id"},
 	Task:         {label: "Task", key: "id"},
+	CatalogItem:  {label: "CatalogItem", key: "id"},
 }
 
 type RelationshipKind string
@@ -245,6 +258,15 @@ const (
 	// RACI ownership of a CI, job code, birthright, role, or entitlement.
 	// Accountable points at one identity; the other three can point at
 	// identities or groups.
+	// Catalog: an item is owned by the team (group) that publishes it, is
+	// visible to groups, and may be approved through a generated workflow. A
+	// catalog request is raised for one item and references the CIs its form
+	// picked from the CMDB.
+	ForCatalogItem  RelationshipKind = "for-catalog-item"
+	CatalogOwnedBy  RelationshipKind = "catalog-owned-by"
+	VisibleTo       RelationshipKind = "visible-to"
+	ApprovedThrough RelationshipKind = "approved-through"
+	References      RelationshipKind = "references"
 	Accountable RelationshipKind = "accountable"
 	Responsible RelationshipKind = "responsible"
 	Consulted   RelationshipKind = "consulted"
@@ -323,6 +345,11 @@ var relationshipSpecs = map[RelationshipKind]relationshipSpec{
 	RequestedFor:   {typeName: "REQUESTED_FOR", inverse: "subject-of", from: Request, to: Identity},
 	RequestsAccess: {typeName: "REQUESTS_ACCESS", inverse: "requested-on", from: Request, to: Role, toKinds: []NodeKind{Role, Entitlement}},
 	TaskItem:       {typeName: "TASK_ITEM", inverse: "item-task", from: Task, to: Role, toKinds: []NodeKind{Role, Entitlement}},
+	ForCatalogItem:  {typeName: "FOR_CATALOG_ITEM", inverse: "has-catalog-request", from: Request, to: CatalogItem},
+	CatalogOwnedBy:  {typeName: "CATALOG_OWNED_BY", inverse: "owns-catalog-item", from: CatalogItem, to: Group},
+	VisibleTo:       {typeName: "VISIBLE_TO", inverse: "sees-catalog-item", from: CatalogItem, to: Group},
+	ApprovedThrough: {typeName: "APPROVED_THROUGH", inverse: "approves-catalog-item", from: CatalogItem, to: Workflow},
+	References:      {typeName: "REFERENCES", inverse: "referenced-by", from: Request, to: CI},
 	Accountable:  {typeName: "ACCOUNTABLE", inverse: "accountable-for", from: CI, fromKinds: raciOwnedKinds, to: Identity},
 	Responsible:  {typeName: "RESPONSIBLE", inverse: "responsible-for", from: CI, fromKinds: raciOwnedKinds, to: Identity, toKinds: []NodeKind{Identity, Group}},
 	Consulted:    {typeName: "CONSULTED", inverse: "consulted-on", from: CI, fromKinds: raciOwnedKinds, to: Identity, toKinds: []NodeKind{Identity, Group}},
@@ -541,7 +568,7 @@ func CriticalityNames() []string {
 func ParseRequestType(value string) (RequestType, error) {
 	requestType := RequestType(strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), " ", "-")))
 	switch requestType {
-	case VendorRequest, AccessRequest:
+	case VendorRequest, AccessRequest, CatalogRequest:
 		return requestType, nil
 	default:
 		return "", fmt.Errorf("%w: unsupported requestType %q; allowed types are %s", ErrInvalid, value, strings.Join(RequestTypeNames(), ", "))
@@ -549,13 +576,19 @@ func ParseRequestType(value string) (RequestType, error) {
 }
 
 func RequestTypeNames() []string {
+	return []string{string(VendorRequest), string(AccessRequest), string(CatalogRequest)}
+}
+
+// WorkflowFormTypes are the forms whose workflows are built in the Workflow
+// Creator. Catalog approval workflows are generated from the catalog item.
+func WorkflowFormTypes() []string {
 	return []string{string(VendorRequest), string(AccessRequest)}
 }
 
 func ParseRequestState(value string) (RequestState, error) {
 	state := RequestState(strings.ToLower(strings.TrimSpace(value)))
 	switch state {
-	case RequestDraft, RequestSubmitted, RequestInReview, RequestFulfilled, RequestDenied:
+	case RequestDraft, RequestSubmitted, RequestInReview, RequestFulfilled, RequestDenied, RequestInProgress, RequestFailed:
 		return state, nil
 	default:
 		return "", fmt.Errorf("%w: unsupported request state %q; allowed states are %s", ErrInvalid, value, strings.Join(RequestStateNames(), ", "))
@@ -563,7 +596,7 @@ func ParseRequestState(value string) (RequestState, error) {
 }
 
 func RequestStateNames() []string {
-	return []string{string(RequestDraft), string(RequestSubmitted), string(RequestInReview), string(RequestFulfilled), string(RequestDenied)}
+	return []string{string(RequestDraft), string(RequestSubmitted), string(RequestInReview), string(RequestFulfilled), string(RequestDenied), string(RequestInProgress), string(RequestFailed)}
 }
 
 // RequestClosedStates are the states the workflow leaves a request in when it
@@ -885,6 +918,11 @@ type TaskOutcome struct {
 	Deny      bool
 	Approve   bool
 	Provision bool
+	// Catalog requests: an approver said no (the request is denied and
+	// retired), or the last approval passed and the request is handed to the
+	// team's automation (the run closes; the request stays open, in progress).
+	DenyRequest bool
+	Handoff     bool
 }
 
 // Managed request properties set by the workflow when a request is returned.
@@ -954,6 +992,8 @@ func GeneratedIDPrefix(kind NodeKind) (string, error) {
 		return "RUN", nil
 	case Task:
 		return "TSK", nil
+	case CatalogItem:
+		return "CAT", nil
 	default:
 		return "", fmt.Errorf("%w: %s IDs are not generated by the application", ErrInvalid, kind)
 	}
@@ -968,7 +1008,7 @@ func CICategoryNames() []string {
 }
 
 func NodeKinds() []NodeKind {
-	return []NodeKind{Identity, JobCode, Birthright, Role, Entitlement, Group, CI, Incident, Change, Event, Request, Workflow, WorkflowStep, WorkflowRun, Task}
+	return []NodeKind{Identity, JobCode, Birthright, Role, Entitlement, Group, CI, Incident, Change, Event, Request, Workflow, WorkflowStep, WorkflowRun, Task, CatalogItem}
 }
 
 // WorkflowNodeKinds are the kinds managed through the workflow API rather than
@@ -978,7 +1018,7 @@ func WorkflowNodeKinds() []NodeKind {
 }
 
 func RelationshipKinds() []RelationshipKind {
-	return []RelationshipKind{HasJobCode, WorkLocation, Member, DraftedRequest, FormSubmitted, RequestedFor, RequestsAccess, HasStep, NextStep, StepAssignedTo, RunFor, InstanceOf, TaskFor, TaskStep, TaskItem, TaskAssignedTo, ActedBy, FulfilledBy, QualifiesFor, Grants, Includes, HasRole, EntitledBy, Permissions, Affects, Changes, AssignedTo, ObservedOn, DependsOn, Hosts, Uses, Governs, Provides, Accountable, Responsible, Consulted, Informed}
+	return []RelationshipKind{HasJobCode, WorkLocation, Member, DraftedRequest, FormSubmitted, RequestedFor, RequestsAccess, HasStep, NextStep, StepAssignedTo, RunFor, InstanceOf, TaskFor, TaskStep, TaskItem, TaskAssignedTo, ActedBy, FulfilledBy, ForCatalogItem, CatalogOwnedBy, VisibleTo, ApprovedThrough, References, QualifiesFor, Grants, Includes, HasRole, EntitledBy, Permissions, Affects, Changes, AssignedTo, ObservedOn, DependsOn, Hosts, Uses, Governs, Provides, Accountable, Responsible, Consulted, Informed}
 }
 
 // RelationshipTypeNames returns the Neo4j relationship types in RelationshipKinds order.

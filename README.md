@@ -9,7 +9,7 @@ A Go application for managing identity/access and CMDB records in Neo4j. The Go 
 - [Podman](https://podman.io/docs/installation) with Compose (check with `podman compose version`), or
 - [Docker](https://docs.docker.com/get-docker/) with Compose v2 (check with `docker compose version`)
 
-The stack uses host ports 3000, 3100, 4317, 4318, 7474, 7687, 8080, 8081, 9090, and 9092. Stop anything already using them, such as standalone Neo4j, Grafana, or Kafka containers.
+The stack uses host ports 3000, 3100, 4317, 4318, 7233, 7474, 7687, 8080, 8081, 8233, 9090, and 9092. Stop anything already using them, such as standalone Neo4j, Grafana, Kafka, or Temporal containers.
 
 ### 2. Start the environment
 
@@ -29,6 +29,7 @@ This pulls the newest published API and dashboard images from GitHub Container R
 | Swagger UI | http://127.0.0.1:8080/api/docs |
 | Grafana (API logs under the Loki data source) | http://localhost:3000 |
 | Neo4j Browser (user `neo4j`, password `your_password`) | http://localhost:7474 |
+| Temporal UI (Service Catalog automation) | http://localhost:8233 |
 
 Stop with `podman compose down`; add `-v` to also delete the data. Running `up -d` again always picks up the newest published API and dashboard images.
 
@@ -43,6 +44,7 @@ To run your own code changes, see [Run in containers](#run-in-containers) (build
 - [CLI](#cli)
 - [Data model](#data-model)
 - [Catalog requests and workflows](#catalog-requests-and-workflows)
+  - [Service Catalog](#service-catalog)
 - [Tests](#tests)
 
 ## Getting started
@@ -67,6 +69,7 @@ podman compose up -d --build      # or: docker compose up -d --build
 | `prometheus` | 127.0.0.1:9090 | Scrapes itself, the collector, and Loki (`deploy/prometheus.yml`). |
 | `grafana` | 3000 | Anonymous admin, with Loki and Prometheus data sources provisioned. |
 | `kafka` | 9092 | Single-node KRaft broker. Containers on the compose network use `kafka:19092`. |
+| `temporal` | 7233 (gRPC), 8233 (UI) | Temporal development server for Service Catalog automation. The API runs the platform's catalog worker against it (`TEMPORAL_ADDRESS=temporal:7233`). |
 
 - **Rebuild after code changes:** run `podman compose up -d --build` again (or `podman compose up -d --build api web` for just the apps). A plain `podman compose up -d` replaces local builds with the newest published images.
 - **Stop:** `podman compose down`. Data lives in named volumes; add `-v` to delete it.
@@ -162,6 +165,10 @@ Vite writes the built app to `internal/httpapi/static`, where Go embeds and serv
 | `NEO4J_DATABASE` | no | Database name; defaults to the server's default database. |
 | `HTTP_ADDR` | no | Listen address for `serve` (also `--addr`). Default `127.0.0.1:8080`; the container image sets `0.0.0.0:8080`. |
 | `ACCESS_ANOMALY_INTERVAL` | no | How often access anomalies are recomputed. Default `15m`; `0` disables. |
+| `TEMPORAL_ADDRESS` | no | Temporal frontend, for example `localhost:7233`. Enables Service Catalog automation and runs the platform's catalog worker in `serve`. Unset, approved catalog requests are marked failed. |
+| `TEMPORAL_NAMESPACE` | no | Temporal namespace. Default `default`. |
+| `TEMPORAL_TASK_QUEUE` | no | Task queue of the platform's catalog worker. Default `servicemap-portal`. |
+| `TEMPORAL_UI_URL` | no | Temporal UI base URL, for example `http://localhost:8233`, so the Workflow Analyzer links to runs. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | no | OTLP/HTTP collector, for example `http://localhost:4318`. Unset logs to stdout only. |
 | `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | no | Logs-specific URL; overrides the general endpoint. |
 | `OTEL_LOGS_EXPORTER` | no | Set to `none` to disable OTLP export. |
@@ -403,7 +410,7 @@ Every relationship is stored once, in its forward direction, and has a paired in
 
 ## Catalog requests and workflows
 
-`GET /api/meta` publishes `requestTypes` (`vendor`, `access`) and `requestStates` (`draft`, `submitted`, `in-review`, `fulfilled`, `denied`).
+`GET /api/meta` publishes `requestTypes` (`vendor`, `access`: the forms whose workflows are built in Workflow Creator) and `requestStates` (`draft`, `submitted`, `in-review`, `fulfilled`, `denied`, `in-progress`, `failed`). Requests raised from the [Service Catalog](#service-catalog) have `requestType` `catalog`.
 
 ### Vendor requests
 
@@ -454,6 +461,38 @@ Tasks are worked in **Catalog requests > Workflow Tasks** and from the user's Ho
 - **Retiring by hand:** **Catalog requests > Workflow Runs** retires finished runs and their tasks (`DELETE /api/nodes/workflow-run/{id}`; an active run is refused), and Workflow Tasks retires completed, approved, or rejected tasks (`DELETE /api/nodes/task/{id}`; a pending task is refused).
 
 Endpoints: `GET/POST /api/workflows`, `GET/PUT/DELETE /api/workflows/{id}`, `GET /api/tasks?actorId=&requestId=&includeDone=`, `GET /api/tasks/{id}`, and `POST /api/tasks/{id}/actions`. `GET /api/meta` publishes `requestFields`, `fulfilmentFields`, `stepTypes`, `approvalRules`, and `taskActions`. Workflow records are read-only through `/api/nodes/{kind}` and appear on the Map.
+
+### Service Catalog
+
+Teams automate their own processes as [Temporal](https://temporal.io) workflows they own as code, and offer them here as **catalog items**. The platform owns the request: it renders the form, decides who may see it, collects approvals, then hands the request to the team's workflow and records what it returned.
+
+**Publishing.** A team describes the item next to its workflow with `pkg/catalogsdk`. The form is generated from the workflow's input struct and its tags (`title`, `description`, `enum`, `default`, `pattern`, `minimum`/`maximum`, `minLength`/`maxLength`, and `portal:"cmdb:<ciType>"` for a CMDB picker); fields without `omitempty` are required. CI builds the manifest and calls `POST /api/catalog-items`, which needs the `CREQ-catalog-publish` entitlement and membership of the item's owner group. The platform enforces its policy on every publish:
+
+- the form is a flat JSON Schema object of string, integer, number, or boolean fields (at most 50), and picker fields name a real CI type;
+- owner and visibility name active groups, and approval assignees name active groups or identities (by id or exact name);
+- an item visible outside its owning team needs at least one approval;
+- republishing the same version with the same content is a no-op, so CI can publish on every build; any change needs a higher version, and versions never go backwards.
+
+Each version with approvals gets its own generated approval workflow (`requestType` `catalog`, steps from the manifest). The previous version's workflow is disabled, not retired, so requests already in review finish on the version they started with. These workflows are hidden from Workflow Creator and cannot be edited there; the team changes them by publishing.
+
+**Requesting.** **Catalog requests > Service Catalog** (`CREQ-catalog-use`) lists the items visible to a group the signed-in identity belongs to (or owned by one), renders each item's form, and lists the identity's catalog requests with their outcome. `POST /api/catalog-requests` checks the inputs against the item's schema; picker fields must name an active CI of the declared type and are linked from the request with `references`, so catalog requests show on the Map next to what they touch. The request records the item version, the Temporal target, and the inputs (as JSON), so republishing never changes a request in flight. `GET /api/catalog-items/{id}/options/{field}` serves the picker's choices, so requesters do not need CMDB read access.
+
+**Lifecycle.**
+
+1. With approvals, the request starts `in-review` and its first approval task is raised in **Workflow Tasks** as usual (SLA, OLA, and holidays apply). An approver approves, or denies with a reason, which closes the request as `denied` and retires it with its run and tasks.
+2. When the last approval passes (or straight away when the item has none) the request moves to `in-progress`, the run closes, and the platform starts its `CatalogFulfilment` workflow on Temporal with the id `catalog-<requestId>`, so a retry never starts a second run.
+3. That workflow runs the team's workflow as a child on the team's task queue, then records the result: `fulfilled` with the workflow's `outputs`, or `failed` with `failureReason`. Failed requests stay open for the owning team.
+
+Requesters can read the task trail of their own requests (`GET /api/tasks?requestId=`) without the Workflow Tasks entitlement.
+
+**Workflow Analyzer.** **Catalog requests > Workflow Analyzer** shows how each catalog item really runs, end to end, as a diagram: who can request it (groups and member counts), the form and the CMDB records its pickers draw on, each approval and who can actually approve it, the platform's hand-off, the team's Temporal workflow and the activities its recent runs executed, and how requests end. Boxes are coloured by health and carry request counts. Alongside the diagram:
+
+- **Findings**: problems that would stop or slow requests (no worker polling a task queue, an approval nobody can act on, a required picker with no CMDB records, a high failure rate) and policy concerns (people who can approve their own requests, the publishing pipeline sitting in an approver group). Clicking one highlights its box.
+- **Platform signals**: request counts by state, average time in approval and to fulfil, who can approve each step, which workers are polling, and recent runs with links into the Temporal UI (`TEMPORAL_UI_URL`).
+
+The analysis is built per request from the item's manifest, the graph (groups, members, CMDB, requests), and Temporal (`DescribeTaskQueue`, visibility queries, and the histories of up to five recent runs for activities). `GET /api/catalog-analysis` summarizes every item the caller can see, and `GET /api/catalog-analysis/{id}` analyzes one. Publishers can also check a manifest before publishing it: `POST /api/catalog-analysis` (or **Check a draft manifest** on the page) runs the same checks against the live platform and reports anything that would make publishing fail as error findings, without storing anything. `catalogsdk.Analyze` wraps it for CI; the example's `analyze` command fails the build on blocking findings.
+
+**Try it.** [`examples/network-team`](examples/network-team) plays a network engineering team's repository: a `ProvisionServer` workflow, the catalog item that offers it, and the commands its CI and worker deployment run. Its README walks through publishing the item, raising a request as a platform engineer, approving it, and watching it complete in the Temporal UI.
 
 ### SLA, OLA, and holidays
 

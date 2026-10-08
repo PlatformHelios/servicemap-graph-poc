@@ -111,6 +111,7 @@ const kindTones: Record<NodeKind, string> = {
   "workflow-step": "yellow",
   "workflow-run": "green",
   task: "green",
+  "catalog-item": "blue",
 };
 
 function nodeID(node: GraphNode) {

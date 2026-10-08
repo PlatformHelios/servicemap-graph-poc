@@ -16,6 +16,7 @@ tags:
   - name: Metadata
   - name: Nodes
   - name: Relationships
+  - name: Service Catalog
 paths:
   /api/health:
     get:
@@ -78,7 +79,7 @@ paths:
           description: Requests only. Return requests raised through one form.
           schema:
             type: string
-            enum: [vendor, access]
+            enum: [vendor, access, catalog]
       responses:
         "200":
           description: Nodes with a bounded sample of their directly attached supported relationships.
@@ -756,6 +757,212 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "500":
           $ref: "#/components/responses/RequestFailed"
+  /api/catalog-items:
+    get:
+      tags: [Service Catalog]
+      summary: List the catalog items offered to the caller
+      description: >-
+        Active items visible to a group the caller belongs to, or owned by one. The super admin sees every item.
+        Requires catalog:use (CREQ-catalog-use).
+      operationId: listCatalogItems
+      responses:
+        "200":
+          description: Catalog items, by title.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CatalogItem"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      tags: [Service Catalog]
+      summary: Publish a catalog item (called by the owning team's CI)
+      description: >-
+        Publishes a manifest, normally generated from the team's workflow code by pkg/catalogsdk. The caller needs
+        catalog:publish (CREQ-catalog-publish) and must be a member of the owner group. The platform checks the
+        manifest against its policy: the input schema is a flat object of scalar fields; owner, visibility, and
+        approval assignees resolve to active groups or identities; and an item visible outside its owning team has
+        at least one approval. Republishing the same version with the same content (source aside) is a no-op; any
+        change needs a higher version. Each version with approvals gets its own generated approval workflow, and the
+        previous one is disabled so requests already in review finish as they started.
+      operationId: publishCatalogItem
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CatalogManifest"
+      responses:
+        "200":
+          description: The item as published.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogItem"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/catalog-items/{id}:
+    get:
+      tags: [Service Catalog]
+      summary: Read one catalog item offered to the caller
+      operationId: getCatalogItem
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The catalog item.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogItem"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/catalog-items/{id}/options/{field}:
+    get:
+      tags: [Service Catalog]
+      summary: List the CMDB records a picker field offers
+      description: >-
+        For a form field marked x-portal-source cmdb:<ciType>, the active CIs of that type, so requesters can
+        complete the form without read access to the whole CMDB.
+      operationId: listCatalogFieldOptions
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: field
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Records the field offers, by name.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [id]
+                  properties:
+                    id:
+                      type: string
+                    name:
+                      type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/catalog-requests:
+    post:
+      tags: [Service Catalog]
+      summary: Raise a request from a catalog item
+      description: >-
+        The caller raises the request for themselves (only the super admin may name requestedById). The item must be
+        offered to the requester, inputs must satisfy its schema, and picker fields must name active CIs of the
+        declared type (linked with references). The request records the item version, Temporal target, and inputs.
+        With approvals it starts in-review with the first approval task raised; approving the last one moves it to
+        in-progress and starts the owning team's workflow on Temporal (workflow id catalog-<requestId>), while denying
+        any (comment required) closes it as denied. Without approvals it goes straight to in-progress. When the team's
+        workflow ends the request becomes fulfilled with its outputs, or failed with failureReason.
+      operationId: createCatalogRequest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CatalogRequestInput"
+      responses:
+        "201":
+          description: Request raised.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Node"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/catalog-analysis:
+    get:
+      tags: [Service Catalog]
+      summary: Summarize the health of every catalog item the caller can see
+      operationId: listCatalogAnalyses
+      responses:
+        "200":
+          description: One summary per item, with counts of error, warning, and info findings.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      tags: [Service Catalog]
+      summary: Analyze a draft manifest without publishing it
+      description: >-
+        Runs the publish checks and the Workflow Analyzer against the live platform (groups, CMDB, Temporal workers)
+        and reports anything that would make publishing fail as error findings. Nothing is stored. Requires
+        catalog:publish.
+      operationId: analyzeCatalogManifest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CatalogManifest"
+      responses:
+        "200":
+          description: The analysis of the draft.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogAnalysis"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/catalog-analysis/{id}:
+    get:
+      tags: [Service Catalog]
+      summary: Analyze one published catalog item
+      description: >-
+        The item's path as a graph (requesters, form, CMDB pickers, approvals, platform hand-off, the team's workflow and
+        its activities, outcomes) with request counts and health, plus findings, approvers, worker status, request
+        statistics, and recent Temporal runs.
+      operationId: analyzeCatalogItem
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The analysis.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogAnalysis"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 components:
   parameters:
     NodeKind:
@@ -851,7 +1058,7 @@ components:
         they can be read and appear on the map, but cannot be created or updated through /api/nodes. DELETE works
         for finished runs (retiring the run and its tasks) and acted-on tasks; active runs, pending tasks, and
         steps are refused.
-      enum: [identity, job-code, birthright, role, entitlement, group, ci, incident, change, event, request, workflow, workflow-step, workflow-run, task]
+      enum: [identity, job-code, birthright, role, entitlement, group, ci, incident, change, event, request, workflow, workflow-step, workflow-run, task, catalog-item]
     CIType:
       type: string
       description: Fixed, reviewed catalog. Additions require a software change and redeployment; runtime type creation is not supported.
@@ -878,8 +1085,9 @@ components:
         The catalog form a request was raised from. vendor requests carry the same properties as the vendor CI they
         describe and are drafted through /api/nodes/request. access requests ask for roles or entitlements an
         identity does not already hold; they are raised complete through POST /api/access-requests and cannot be
-        created as drafts.
-      enum: [vendor, access]
+        created as drafts. catalog requests are raised from a Service Catalog item through POST
+        /api/catalog-requests; their approval workflows are generated from the item, not built in Workflow Creator.
+      enum: [vendor, access, catalog]
     RequestState:
       type: string
       description: >-
@@ -894,7 +1102,9 @@ components:
         to draft with returnComment / returnedAt set. Access requests start in-review and end fulfilled (at least
         one item provisioned) or denied (every item refused). Callers may only set draft (on create) or submitted;
         in-review, fulfilled, and denied are set by the workflow, and a request never moves backwards through the API.
-      enum: [draft, submitted, in-review, fulfilled, denied]
+        Catalog requests are in-progress while the owning team's Temporal workflow runs and end fulfilled (outputs
+        recorded), failed (failureReason recorded; the request stays open), or denied by an approver.
+      enum: [draft, submitted, in-review, fulfilled, denied, in-progress, failed]
     StepType:
       type: string
       description: review steps complete once the assignees have looked the form over (filling in any exposed fields); approval steps need approvals under their rule.
@@ -1276,6 +1486,218 @@ components:
           enum: [role, entitlement]
         note:
           type: string
+    CatalogApproval:
+      type: object
+      required: [name, assignees]
+      properties:
+        name:
+          type: string
+        assignees:
+          type: array
+          description: Groups or identities, by id or exact name (stored as ids once published).
+          items:
+            type: string
+        rule:
+          type: string
+          enum: [any, all]
+        instructions:
+          type: string
+    CatalogTarget:
+      type: object
+      required: [taskQueue, workflowType]
+      properties:
+        taskQueue:
+          type: string
+        workflowType:
+          type: string
+    CatalogManifest:
+      type: object
+      required: [name, version, title, owner, inputs, target]
+      properties:
+        name:
+          type: string
+          description: Stable lowercase slug, e.g. server-request.
+        version:
+          type: string
+          description: major.minor.patch; must increase whenever the content changes.
+        title:
+          type: string
+        description:
+          type: string
+        owner:
+          type: string
+          description: The owning group, by id or exact name.
+        visibility:
+          type: array
+          description: Groups whose members may raise the item; the owner always can.
+          items:
+            type: string
+        approvals:
+          type: array
+          items:
+            $ref: "#/components/schemas/CatalogApproval"
+        slaBusinessDays:
+          type: integer
+          minimum: 0
+        inputs:
+          type: object
+          description: >-
+            JSON Schema (an object of string, integer, number, or boolean fields) for the form. x-portal-source
+            cmdb:<ciType> marks a field whose value is a CMDB record; x-order lists the fields in display order.
+          additionalProperties: true
+        outputs:
+          type: object
+          description: JSON Schema of what the workflow returns.
+          additionalProperties: true
+        target:
+          $ref: "#/components/schemas/CatalogTarget"
+        source:
+          type: string
+          description: Where the manifest was published from, e.g. repo@commit. Ignored when comparing content.
+    CatalogItem:
+      type: object
+      required: [id, name, version, title, owner, visibility, approvals, inputs, target, status]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        version:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+        owner:
+          $ref: "#/components/schemas/Assignee"
+        visibility:
+          type: array
+          items:
+            $ref: "#/components/schemas/Assignee"
+        approvals:
+          type: array
+          items:
+            $ref: "#/components/schemas/CatalogApproval"
+        slaBusinessDays:
+          type: integer
+        inputs:
+          type: object
+          additionalProperties: true
+        outputs:
+          type: object
+          additionalProperties: true
+        target:
+          $ref: "#/components/schemas/CatalogTarget"
+        workflowId:
+          type: string
+          description: The generated approval workflow for this version, when it has approvals.
+        source:
+          type: string
+        publishedAt:
+          type: string
+          format: date-time
+        publishedBy:
+          type: string
+        status:
+          type: string
+          enum: [active, retired]
+    CatalogAnalysis:
+      type: object
+      required: [item, draft, generatedAt, nodes, edges, findings]
+      properties:
+        item:
+          $ref: "#/components/schemas/CatalogItem"
+        draft:
+          type: boolean
+        generatedAt:
+          type: string
+          format: date-time
+        temporalConfigured:
+          type: boolean
+        temporalUiUrl:
+          type: string
+        nodes:
+          type: array
+          items:
+            type: object
+            required: [id, kind, label, lines, health]
+            properties:
+              id:
+                type: string
+              kind:
+                type: string
+                enum: [requesters, form, cmdb, approval, handoff, workflow, activity, fulfilled, failed, denied]
+              label:
+                type: string
+              detail:
+                type: string
+              lines:
+                type: array
+                items:
+                  type: string
+              health:
+                type: string
+                enum: [ok, warning, error, unknown]
+              count:
+                type: integer
+        edges:
+          type: array
+          items:
+            type: object
+            required: [from, to]
+            properties:
+              from:
+                type: string
+              to:
+                type: string
+              label:
+                type: string
+              count:
+                type: integer
+        findings:
+          type: array
+          items:
+            type: object
+            required: [severity, code, message]
+            properties:
+              severity:
+                type: string
+                enum: [error, warning, info]
+              code:
+                type: string
+              message:
+                type: string
+              nodeId:
+                type: string
+        approvers:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        requests:
+          type: object
+          additionalProperties: true
+        workers:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        runs:
+          type: object
+          additionalProperties: true
+    CatalogRequestInput:
+      type: object
+      required: [catalogItemId, inputs]
+      properties:
+        catalogItemId:
+          type: string
+        requestedById:
+          type: string
+          description: Defaults to the caller; only the super admin may name someone else.
+        inputs:
+          type: object
+          description: Values for the item's form, checked against its input schema.
+          additionalProperties: true
     AccessRequestInput:
       type: object
       required: [requestedById, requestForId, items]
@@ -1306,7 +1728,7 @@ components:
       example: 08:00-17:00
     RelationshipKind:
       type: string
-      enum: [has-job-code, work-location, member, drafted-request, form-submitted, requested-for, requests-access, has-step, next-step, step-assigned-to, run-for, instance-of, task-for, task-step, task-item, task-assigned-to, acted-by, fulfilled-by, qualifies-for, grants, includes, has-role, entitled-by, permissions, affects, changes, assigned-to, observed-on, depends-on, hosts, uses, governs, provides, accountable, responsible, consulted, informed]
+      enum: [has-job-code, work-location, member, drafted-request, form-submitted, requested-for, requests-access, has-step, next-step, step-assigned-to, run-for, instance-of, task-for, task-step, task-item, task-assigned-to, acted-by, fulfilled-by, for-catalog-item, catalog-owned-by, visible-to, approved-through, references, qualifies-for, grants, includes, has-role, entitled-by, permissions, affects, changes, assigned-to, observed-on, depends-on, hosts, uses, governs, provides, accountable, responsible, consulted, informed]
       description: >-
         Canonical lowercase kebab-case forward relationship names. The API also accepts uppercase underscore aliases.
         Every relationship is stored once in its forward direction; GET /api/meta returns the inverse label for each

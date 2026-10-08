@@ -15,6 +15,8 @@ import {
   RefreshCw,
   Search,
   ShieldCheck,
+  Store,
+  ScanSearch,
   Users,
   UsersRound,
   Workflow,
@@ -175,6 +177,7 @@ const summaryHeadings: Record<NodeKind, string> = {
   "workflow-step": "Assignment",
   "workflow-run": "Request",
   task: "Assignment",
+  "catalog-item": "Owner and visibility",
 };
 
 function summaryHeading(resource: Resource) {
@@ -288,6 +291,8 @@ const LocationMap = lazy(() => import("./LocationMap"));
 const WorkflowCreator = lazy(() => import("./WorkflowCreator"));
 const WorkflowTasks = lazy(() => import("./WorkflowTasks"));
 const AccessRequestForm = lazy(() => import("./AccessRequestForm"));
+const ServiceCatalog = lazy(() => import("./ServiceCatalog"));
+const WorkflowAnalyzer = lazy(() => import("./WorkflowAnalyzer"));
 const Home = lazy(() => import("./Home"));
 
 const resourceInfo: Record<Resource, { title: string; singular: string; subtitle: string; kicker: string }> = {
@@ -314,6 +319,9 @@ const resourceInfo: Record<Resource, { title: string; singular: string; subtitle
   "workflow-step": { title: "Workflow steps", singular: "workflow step", subtitle: "Steps within a workflow.", kicker: "CATALOG REQUESTS" },
   "workflow-run": { title: "Workflow runs", singular: "workflow run", subtitle: "Each submitted request's passage through its workflow. Runs retire with their tasks when the workflow completes; finished runs from earlier can be retired here.", kicker: "CATALOG REQUESTS" },
   task: { title: "Tasks", singular: "task", subtitle: "Work raised by a workflow run.", kicker: "CATALOG REQUESTS" },
+  catalog: { title: "Service Catalog", singular: "catalog request", subtitle: "Request what teams have automated. Each item is published by the team that owns its workflow; approvals come to the portal first, then the team's automation fulfils it.", kicker: "CATALOG REQUESTS" },
+  "workflow-analyzer": { title: "Workflow Analyzer", singular: "analysis", subtitle: "How each catalog item runs end to end: who can request it, the form, who approves, the platform hand-off, and the team's Temporal workflow, with live health and findings.", kicker: "CATALOG REQUESTS" },
+  "catalog-item": { title: "Catalog items", singular: "catalog item", subtitle: "Self-service items published by the teams that automate them.", kicker: "CATALOG REQUESTS" },
 };
 
 // A named form field; `group` starts a labelled section (rendered once per run of fields).
@@ -359,6 +367,7 @@ const nodeFields: Record<NodeKind, FormField[]> = {
   "workflow-step": [{ key: "name", label: "Step name" }],
   "workflow-run": [{ key: "name", label: "Workflow" }],
   task: [{ key: "name", label: "Step" }],
+  "catalog-item": [{ key: "title", label: "Title" }, { key: "version", label: "Version" }, { key: "workflowType", label: "Workflow" }, { key: "taskQueue", label: "Task queue" }],
 };
 
 const categorizedCITypes = new Set<string>(["service", "process", "function"]);
@@ -538,6 +547,8 @@ const navigation: { label: string; items: { kind: Resource; title: string; Icon:
   { label: "CATALOG REQUESTS", items: [
     { kind: "request", title: "Vendor Request Form", Icon: ClipboardList },
     { kind: "access-request", title: "Access Request Form", Icon: KeyRound },
+    { kind: "catalog", title: "Service Catalog", Icon: Store },
+    { kind: "workflow-analyzer", title: "Workflow Analyzer", Icon: ScanSearch },
     { kind: "workflow-creator", title: "Workflow Creator", Icon: Workflow },
     { kind: "workflow-tasks", title: "Workflow Tasks", Icon: ListChecks },
     { kind: "workflow-run", title: "Workflow Runs", Icon: RefreshCw },
@@ -550,7 +561,7 @@ function chromeFor(resource: Resource) {
 }
 
 // Views that render their own panel instead of a record table.
-const canvasResources = new Set<Resource>(["home", "map", "location-map", "workflow-creator", "workflow-tasks", "access-request"]);
+const canvasResources = new Set<Resource>(["home", "map", "location-map", "workflow-creator", "workflow-tasks", "access-request", "catalog", "workflow-analyzer"]);
 // Workflow records opened from the map go to the view that manages them rather than the record editor.
 const workflowNodeKinds = new Set<NodeKind>(["workflow", "workflow-step", "workflow-run", "task"]);
 
@@ -741,7 +752,8 @@ function App() {
   const filteredRecords = records;
   // A saved request opens on the form it was raised from.
   const openRequest = (record: GraphNode) => {
-    setResource(requestTypeOf(record) === "access" ? "access-request" : "request");
+    const type = requestTypeOf(record);
+    setResource(type === "access" ? "access-request" : type === "catalog" ? "catalog" : "request");
     setRequestRecord(record);
   };
   // A listed record carries only a sample of its links; the editor reconciles
@@ -901,6 +913,8 @@ function App() {
           : resource === "location-map" ? <Suspense fallback={<div className="map-canvas map-overlay">Loading location map…</div>}><LocationMap reload={reload} onEdit={editNode} /></Suspense>
           : resource === "workflow-creator" ? <Suspense fallback={<div className="editor-dialog editor-inline workflow-loading">Loading Workflow Creator…</div>}><WorkflowCreator metadata={metadata} reload={reload} onNotify={setToast} /></Suspense>
           : resource === "workflow-tasks" ? <Suspense fallback={<div className="editor-dialog editor-inline workflow-loading">Loading Workflow Tasks…</div>}><WorkflowTasks user={user} metadata={metadata} reload={reload} onNotify={setToast} onOpenRequest={openRequest} onRetire={(task) => setRetiring({ type: "node", kind: "task", record: { kind: "task", id: task.id, status: "active", properties: { name: task.step.name } } })} /></Suspense>
+          : resource === "workflow-analyzer" ? <Suspense fallback={<div className="editor-dialog editor-inline workflow-loading">Loading Workflow Analyzer…</div>}><WorkflowAnalyzer reload={reload} canPublish={access?.superAdmin === true || (access?.capabilities ?? []).includes("catalog:publish")} /></Suspense>
+          : resource === "catalog" ? <Suspense fallback={<div className="editor-dialog editor-inline workflow-loading">Loading Service Catalog…</div>}><ServiceCatalog key={user.id} user={user} reload={reload} onNotify={setToast} openRequest={requestRecord} onOpenRequest={setRequestRecord} /></Suspense>
           : resource === "access-request" ? <Suspense fallback={<div className="editor-dialog editor-inline workflow-loading">Loading Access Request Form…</div>}><AccessRequestForm key={user.id} user={user} metadata={metadata} reload={reload} onNotify={setToast} openRequest={requestRecord} onOpenRequest={setRequestRecord} /></Suspense>
           : <>{resource === "request" && <section className="records-section request-form-panel" aria-label="Vendor Request Form">
             <RecordDialog key={`request-${requestRecord?.id ?? "new"}-${requestFormVersion}`} inline target={{ type: "node", kind: "request", record: requestRecord ?? undefined }} metadata={metadata} onClose={() => setRequestRecord(null)} onSave={saveRecord} />

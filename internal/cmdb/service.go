@@ -41,6 +41,23 @@ type Store interface {
 	AccessAnomalies(context.Context) (*AccessAnomalyReport, error)
 	RefreshAccessAnomalies(context.Context) (*AccessAnomalyReport, error)
 	CreateAccessRequest(context.Context, AccessRequestInput, string) (*Node, error)
+	// Service Catalog; see catalog.go. ResolveAssignees finds the active
+	// groups and identities whose id or name is the reference.
+	ResolveAssignees(context.Context, string) ([]Assignee, error)
+	IdentityGroups(context.Context, string) ([]string, error)
+	SaveCatalogItem(ctx context.Context, manifest CatalogManifest, manifestJSON, workflowID, publishedBy string) (*CatalogItemView, error)
+	GetCatalogItem(context.Context, string) (*CatalogItemView, error)
+	GetCatalogItemByName(context.Context, string) (*CatalogItemView, error)
+	CatalogManifest(context.Context, string) (string, error)
+	// ListCatalogItems lists active items; with an identity id, only those
+	// visible to (or owned by) a group the identity belongs to.
+	ListCatalogItems(context.Context, string) ([]CatalogItemView, error)
+	CreateCatalogRequest(context.Context, CatalogRequestRecord) (*Node, error)
+	SettleCatalogRequest(context.Context, string, CatalogOutcome) (*Node, error)
+	// Workflow Analyzer; see analysis.go. GroupMembers maps each group id to
+	// its active member identities.
+	GroupMembers(context.Context, []string) (map[string][]Assignee, error)
+	CatalogRequestSummaries(context.Context, string) ([]CatalogRequestSummary, error)
 	ListHolidays(context.Context) ([]Holiday, error)
 	SaveHolidays(context.Context, []Holiday) error
 	CreateRelationship(context.Context, RelationshipKind, string, string, map[string]any) (*Relationship, error)
@@ -51,8 +68,10 @@ type Store interface {
 }
 
 type Service struct {
-	store    Store
-	geocoder Geocoder
+	store      Store
+	geocoder   Geocoder
+	automation CatalogAutomation
+	insight    AutomationInsight
 }
 
 func NewService(store Store) *Service {
@@ -282,6 +301,9 @@ func rejectWorkflowKind(kind NodeKind) error {
 			return fmt.Errorf("%w: %s records are managed through the workflow API", ErrInvalid, kind)
 		}
 	}
+	if kind == CatalogItem {
+		return fmt.Errorf("%w: catalog items are published by their owning team (POST /api/catalog-items)", ErrInvalid)
+	}
 	return nil
 }
 
@@ -329,6 +351,9 @@ func validateRequestProperties(properties map[string]any, creating bool) error {
 		if creating && requestType == AccessRequest {
 			return fmt.Errorf("%w: access requests are raised complete from the Access Request Form (POST /api/access-requests); they are not drafted", ErrInvalid)
 		}
+		if creating && requestType == CatalogRequest {
+			return fmt.Errorf("%w: catalog requests are raised from a catalog item (POST /api/catalog-requests); they are not drafted", ErrInvalid)
+		}
 		properties["requestType"] = string(requestType)
 	} else if creating {
 		return fmt.Errorf("%w: request records require a requestType (%s)", ErrInvalid, strings.Join(RequestTypeNames(), ", "))
@@ -345,7 +370,7 @@ func validateRequestProperties(properties map[string]any, creating bool) error {
 		if creating && state != RequestDraft {
 			return fmt.Errorf("%w: requests are created as drafts; submit them by updating state to %s once a requester is linked", ErrInvalid, RequestSubmitted)
 		}
-		if state == RequestInReview || state == RequestFulfilled || state == RequestDenied {
+		if state == RequestInReview || state == RequestFulfilled || state == RequestDenied || state == RequestInProgress || state == RequestFailed {
 			return fmt.Errorf("%w: state %s is set by the workflow, not by callers", ErrInvalid, state)
 		}
 		properties["state"] = string(state)
@@ -644,6 +669,9 @@ func (s *Service) RetireNode(ctx context.Context, kind NodeKind, id string) (*No
 	}
 	if err := validateID(id); err != nil {
 		return nil, err
+	}
+	if kind == Identity && id == PlatformSuperAdminID {
+		return nil, fmt.Errorf("%w: the platform super admin identity is a system account and cannot be retired", ErrInvalid)
 	}
 	switch kind {
 	case Workflow:
