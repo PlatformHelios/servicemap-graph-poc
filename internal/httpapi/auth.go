@@ -82,6 +82,24 @@ func relationshipReadAllowed(access *cmdb.ActorAccess) bool {
 	return len(access.Capabilities) > 0 || len(access.Entitlements) > 0
 }
 
+// raisedBy reports whether the identity drafted or submitted the request, so
+// requesters can follow their own request's progress.
+func (h *handler) raisedBy(r *http.Request, requestID, actorID string) bool {
+	if actorID == "" {
+		return false
+	}
+	request, err := h.service.GetNode(r.Context(), cmdb.Request, requestID, true)
+	if err != nil {
+		return false
+	}
+	for _, relationship := range request.Relationships {
+		if (relationship.Kind == cmdb.FormSubmitted || relationship.Kind == cmdb.DraftedRequest) && relationship.FromID == actorID && relationship.ToID == requestID {
+			return true
+		}
+	}
+	return false
+}
+
 func taskAssignedTo(actorID string, task *cmdb.TaskView) bool {
 	if task == nil || actorID == "" {
 		return false

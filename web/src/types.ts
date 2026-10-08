@@ -13,15 +13,19 @@ export type NodeKind =
   | "workflow"
   | "workflow-step"
   | "workflow-run"
-  | "task";
+  | "task"
+  | "catalog-item";
 
 // Catalog requests capture a CI before it exists. Drafts may be incomplete;
 // submitting requires everything the target CI type needs. Submitting a form
 // with an enabled workflow moves it to in-review; the last step fulfils it.
 // Access requests ask for roles or entitlements; they are raised complete and
 // end fulfilled (something provisioned) or denied (every item refused).
-export type RequestType = "vendor" | "access";
-export type RequestState = "draft" | "submitted" | "in-review" | "fulfilled" | "denied";
+// Catalog requests are raised from a team's catalog item: approvals put them
+// in-review, then they are in-progress while the team's workflow runs, and end
+// fulfilled (with its outputs), failed, or denied.
+export type RequestType = "vendor" | "access" | "catalog";
+export type RequestState = "draft" | "submitted" | "in-review" | "fulfilled" | "denied" | "in-progress" | "failed";
 
 export type CIType = "server" | "printer" | "data-connector" | "application" | "service" | "process" | "function" | "location" | "contract" | "vendor";
 
@@ -52,6 +56,11 @@ export type RelationshipKind =
   | "task-assigned-to"
   | "acted-by"
   | "fulfilled-by"
+  | "for-catalog-item"
+  | "catalog-owned-by"
+  | "visible-to"
+  | "approved-through"
+  | "references"
   | "qualifies-for"
   | "grants"
   | "includes"
@@ -334,7 +343,132 @@ export interface Metadata {
   relationships: RelationshipDefinition[];
 }
 
-export type Resource = NodeKind | "home" | "relationships" | "map" | "location-map" | "workflow-creator" | "workflow-tasks" | "access-request";
+export type Resource = NodeKind | "home" | "relationships" | "map" | "location-map" | "workflow-creator" | "workflow-tasks" | "access-request" | "catalog" | "workflow-analyzer";
+
+// A form field of a catalog item: one property of its input JSON Schema.
+export interface CatalogField {
+  type: "string" | "integer" | "number" | "boolean";
+  title?: string;
+  description?: string;
+  enum?: (string | number)[];
+  default?: string | number | boolean;
+  pattern?: string;
+  minimum?: number;
+  maximum?: number;
+  minLength?: number;
+  maxLength?: number;
+  "x-portal-source"?: string; // cmdb:<ciType>: the value is a CMDB record, offered as a picker
+}
+
+export interface CatalogSchema {
+  type: "object";
+  properties: Record<string, CatalogField>;
+  required?: string[];
+  "x-order"?: string[];
+}
+
+export interface CatalogApproval {
+  name: string;
+  assignees: string[];
+  rule?: ApprovalRule;
+  instructions?: string;
+}
+
+// A published Service Catalog item: offered by the team that automates it.
+export interface CatalogItem {
+  id: string;
+  name: string;
+  version: string;
+  title: string;
+  description?: string;
+  owner: Assignee;
+  visibility: Assignee[];
+  approvals: CatalogApproval[];
+  slaBusinessDays?: number;
+  inputs: CatalogSchema;
+  outputs?: CatalogSchema;
+  target: { taskQueue: string; workflowType: string };
+  workflowId?: string;
+  source?: string;
+  publishedAt?: string;
+  publishedBy?: string;
+  status: "active" | "retired";
+}
+
+// Workflow Analyzer: a catalog item's path through the platform and Temporal.
+export type AnalysisHealth = "ok" | "warning" | "error" | "unknown";
+
+export interface AnalysisNode {
+  id: string;
+  kind: string; // requesters, form, cmdb, approval, handoff, workflow, activity, fulfilled, failed, denied
+  label: string;
+  detail?: string;
+  lines: string[];
+  health: AnalysisHealth;
+  count?: number;
+}
+
+export interface AnalysisEdge {
+  from: string;
+  to: string;
+  label?: string;
+  count?: number;
+}
+
+export interface AnalysisFinding {
+  severity: "error" | "warning" | "info";
+  code: string;
+  message: string;
+  nodeId?: string;
+}
+
+export interface WorkerStatus {
+  taskQueue: string;
+  workflowPollers: number;
+  activityPollers: number;
+  workers: string[];
+  lastSeen?: string;
+  error?: string;
+}
+
+export interface RunSummary {
+  workflowType: string;
+  total: number;
+  statusCounts: Record<string, number>;
+  averageSeconds?: number;
+  activities: { name: string; scheduled: number; completed: number; failed: number; averageSeconds?: number; lastError?: string }[];
+  recent: { workflowId: string; runId: string; status: string; startedAt: string; closedAt?: string; seconds?: number }[];
+  error?: string;
+}
+
+export interface CatalogAnalysis {
+  item: CatalogItem;
+  draft: boolean;
+  generatedAt: string;
+  temporalConfigured: boolean;
+  temporalUiUrl?: string;
+  nodes: AnalysisNode[];
+  edges: AnalysisEdge[];
+  findings: AnalysisFinding[];
+  approvers: { step: string; rule: string; assignees: Assignee[]; eligible: Assignee[] }[];
+  requests: { total: number; byState: Record<string, number>; byVersion: Record<string, number>; averageApprovalHours?: number; averageFulfilmentHours?: number; recentFailures: string[] };
+  workers: WorkerStatus[];
+  runs?: RunSummary;
+}
+
+export interface CatalogAnalysisSummary {
+  item: CatalogItem;
+  errors: number;
+  warnings: number;
+  infos: number;
+  requests: number;
+  health: AnalysisHealth;
+}
+
+export interface CatalogOption {
+  id: string;
+  name?: string;
+}
 
 export type RecordEditorTarget =
   | { type: "node"; kind: NodeKind; record?: GraphNode; defaults?: Properties; ciIds?: string[]; assignedTo?: string[] }

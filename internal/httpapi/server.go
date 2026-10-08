@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PlatformHelios/servicemap-graph-poc/internal/automation"
 	"github.com/PlatformHelios/servicemap-graph-poc/internal/cmdb"
 	"github.com/PlatformHelios/servicemap-graph-poc/internal/config"
 	"github.com/PlatformHelios/servicemap-graph-poc/internal/geocode"
@@ -109,6 +110,16 @@ func NewHandlerWithLogger(service *cmdb.Service, logger *slog.Logger) http.Handl
 	mux.HandleFunc("PUT /api/holidays", api.saveHolidays)
 	mux.HandleFunc("GET /api/form-sla", api.formSLA)
 	mux.HandleFunc("GET /api/capabilities", api.capabilities)
+	// Service Catalog: items published by the teams that automate them, and
+	// requests raised from them.
+	mux.HandleFunc("GET /api/catalog-items", api.listCatalogItems)
+	mux.HandleFunc("POST /api/catalog-items", api.publishCatalogItem)
+	mux.HandleFunc("GET /api/catalog-items/{id}", api.getCatalogItem)
+	mux.HandleFunc("GET /api/catalog-items/{id}/options/{field}", api.catalogFieldOptions)
+	mux.HandleFunc("POST /api/catalog-requests", api.createCatalogRequest)
+	mux.HandleFunc("GET /api/catalog-analysis", api.analyzeCatalogItems)
+	mux.HandleFunc("POST /api/catalog-analysis", api.analyzeManifest)
+	mux.HandleFunc("GET /api/catalog-analysis/{id}", api.analyzeCatalogItem)
 
 	static, err := fs.Sub(dashboard, "static")
 	if err != nil {
@@ -166,13 +177,13 @@ func (h *handler) metadata(w http.ResponseWriter, _ *http.Request) {
 		}
 		relationships = append(relationships, item)
 	}
-	requestFields := make(map[string][]string, len(cmdb.RequestTypeNames()))
-	fulfilmentFields := make(map[string][]string, len(cmdb.RequestTypeNames()))
-	for _, name := range cmdb.RequestTypeNames() {
+	requestFields := make(map[string][]string, len(cmdb.WorkflowFormTypes()))
+	fulfilmentFields := make(map[string][]string, len(cmdb.WorkflowFormTypes()))
+	for _, name := range cmdb.WorkflowFormTypes() {
 		requestFields[name] = cmdb.RequestFieldKeys(cmdb.RequestType(name))
 		fulfilmentFields[name] = cmdb.RequestFulfilmentProperties(cmdb.RequestType(name))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"nodeKinds": cmdb.NodeKinds(), "ciTypes": cmdb.CITypeNames(), "ciCategories": cmdb.CICategoryNames(), "contractTypes": cmdb.ContractTypeNames(), "hostingModels": cmdb.HostingModelNames(), "criticalities": cmdb.CriticalityNames(), "requestTypes": cmdb.RequestTypeNames(), "requestStates": cmdb.RequestStateNames(), "requestFields": requestFields, "fulfilmentFields": fulfilmentFields, "stepTypes": cmdb.StepTypeNames(), "approvalRules": cmdb.ApprovalRuleNames(), "taskActions": cmdb.TaskActionNames(), "raciKinds": cmdb.RACIOwnedKinds(), "accessItemKinds": cmdb.AccessItemKinds(), "accessWorkflowTemplate": cmdb.AccessWorkflowTemplate(), "relationships": relationships})
+	writeJSON(w, http.StatusOK, map[string]any{"nodeKinds": cmdb.NodeKinds(), "ciTypes": cmdb.CITypeNames(), "ciCategories": cmdb.CICategoryNames(), "contractTypes": cmdb.ContractTypeNames(), "hostingModels": cmdb.HostingModelNames(), "criticalities": cmdb.CriticalityNames(), "requestTypes": cmdb.WorkflowFormTypes(), "requestStates": cmdb.RequestStateNames(), "requestFields": requestFields, "fulfilmentFields": fulfilmentFields, "stepTypes": cmdb.StepTypeNames(), "approvalRules": cmdb.ApprovalRuleNames(), "taskActions": cmdb.TaskActionNames(), "raciKinds": cmdb.RACIOwnedKinds(), "accessItemKinds": cmdb.AccessItemKinds(), "accessWorkflowTemplate": cmdb.AccessWorkflowTemplate(), "relationships": relationships})
 }
 
 func (h *handler) listWorkflows(w http.ResponseWriter, r *http.Request) {
@@ -265,9 +276,11 @@ func (h *handler) listTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	filter := cmdb.TaskFilter{ActorID: r.URL.Query().Get("actorId"), RequestID: r.URL.Query().Get("requestId")}
-	// Own queue (Home) is always allowed; listing all tasks needs the Workflow Tasks entitlement.
+	// Own queue (Home) and the trail of one's own request are always allowed;
+	// listing all tasks needs the Workflow Tasks entitlement.
 	ownQueue := !access.SuperAdmin && filter.ActorID != "" && filter.ActorID == access.ActorID && filter.RequestID == ""
-	if !ownQueue && !access.Has(cmdb.CapWorkflowTasksRead) && !access.SuperAdmin {
+	ownRequest := !access.SuperAdmin && filter.ActorID == "" && filter.RequestID != "" && h.raisedBy(r, filter.RequestID, access.ActorID)
+	if !ownQueue && !ownRequest && !access.Has(cmdb.CapWorkflowTasksRead) && !access.SuperAdmin {
 		writeServiceError(w, fmt.Errorf("%w: missing capability %s", cmdb.ErrForbidden, cmdb.CapWorkflowTasksRead))
 		return
 	}
@@ -319,6 +332,13 @@ func (h *handler) actOnTask(w http.ResponseWriter, r *http.Request) {
 	input, err := decodeJSON[cmdb.TaskActionInput](w, r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if access.SuperAdmin && strings.TrimSpace(input.ActorID) == "" {
+		input.ActorID = cmdb.PlatformSuperAdminID
+	}
+	if !access.SuperAdmin && strings.TrimSpace(input.ActorID) == cmdb.PlatformSuperAdminID {
+		writeServiceError(w, fmt.Errorf("%w: only the platform super admin may act as the platform super admin", cmdb.ErrForbidden))
 		return
 	}
 	// Assignees may act from Home without the Workflow Tasks page entitlement.
@@ -1084,6 +1104,21 @@ func Run(ctx context.Context, args []string) error {
 	// request so every read can rely on them.
 	if err := service.EnsureConstraints(ctx); err != nil {
 		return fmt.Errorf("prepare Neo4j schema: %w", err)
+	}
+
+	// With TEMPORAL_ADDRESS set, approved catalog requests start their team's
+	// workflow and this process runs the platform's fulfilment worker.
+	workerCtx, stopWorker := context.WithCancel(ctx)
+	defer stopWorker()
+	if temporalConfig := automation.ConfigFromEnv(); temporalConfig.Address != "" {
+		engine, err := automation.Connect(temporalConfig, logger)
+		if err != nil {
+			return err
+		}
+		defer engine.Close()
+		service.WithAutomation(engine).WithInsight(engine)
+		go engine.RunWorker(workerCtx, service, logger)
+		fmt.Printf("Catalog automation via Temporal at %s (namespace %s, task queue %s)\n", temporalConfig.Address, temporalConfig.Namespace, temporalConfig.TaskQueue)
 	}
 
 	listener, err := net.Listen("tcp", *address)

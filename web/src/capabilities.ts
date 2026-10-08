@@ -50,6 +50,9 @@ export function canViewResource(access: ActorAccess | null | undefined, resource
       return hasCapability(access, "vendor-request:use");
     case "access-request":
       return hasCapability(access, "access-request:use");
+    case "catalog":
+    case "workflow-analyzer":
+      return hasCapability(access, "catalog:use");
     case "workflow-creator":
       return hasCapability(access, "workflow-creator:use");
     case "workflow-tasks":

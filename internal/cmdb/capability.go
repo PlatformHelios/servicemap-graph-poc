@@ -11,6 +11,10 @@ import (
 // That actor has every capability regardless of entitlements or groups.
 const PlatformSuperAdminID = "platform-super-admin"
 
+// PlatformSuperAdminName names the super admin's identity record, which the
+// store keeps in place so its actions link to an identity like anyone's.
+const PlatformSuperAdminName = "Platform Super Admin"
+
 // ErrForbidden is returned when the actor lacks a required platform capability.
 var ErrForbidden = errors.New("forbidden")
 
@@ -72,6 +76,10 @@ const (
 	CapWorkflowCreatorUse   Capability = "workflow-creator:use"
 	CapWorkflowTasksRead    Capability = "workflow-tasks:read"
 	CapWorkflowRunsRead     Capability = "workflow-runs:read"
+	// Service Catalog: raising requests from the items an actor can see, and
+	// publishing items (what a team's CI pipeline holds).
+	CapCatalogUse     Capability = "catalog:use"
+	CapCatalogPublish Capability = "catalog:publish"
 )
 
 // ActorAccess is the resolved platform access for a signed-in actor.
@@ -157,6 +165,8 @@ var entitlementCapabilities = map[string][]Capability{
 	"CREQ-workflowcreator-use":   {CapWorkflowCreatorUse},
 	"CREQ-workflowtasks-read":    {CapWorkflowTasksRead},
 	"CREQ-workflowruns-read":     {CapWorkflowRunsRead},
+	"CREQ-catalog-use":           {CapCatalogUse},
+	"CREQ-catalog-publish":       {CapCatalogUse, CapCatalogPublish},
 }
 
 // AccessFromEntitlements builds ActorAccess from held entitlement names.
@@ -226,6 +236,8 @@ func NodeReadCapability(kind NodeKind) (Capability, bool) {
 		return CapWorkflowRunsRead, true
 	case Workflow, WorkflowStep, Task:
 		return CapWorkflowCreatorUse, true
+	case CatalogItem:
+		return CapCatalogUse, true
 	default:
 		return "", false
 	}
@@ -379,6 +391,8 @@ func RelationshipMutateCapabilities(kind RelationshipKind) []Capability {
 		return []Capability{CapWorkflowCreatorUse}
 	case RunFor, InstanceOf, TaskFor, TaskStep, TaskItem, TaskAssignedTo, ActedBy, FulfilledBy:
 		return []Capability{CapWorkflowCreatorUse, CapWorkflowTasksRead, CapAccessRequestUse, CapVendorRequestUse}
+	case ForCatalogItem, CatalogOwnedBy, VisibleTo, ApprovedThrough, References:
+		return []Capability{CapCatalogPublish}
 	default:
 		return []Capability{CapRelationshipCreate}
 	}

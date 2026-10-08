@@ -37,7 +37,7 @@ export default function UserMenu({ user, identities, identitiesError, onActAs, o
       <strong className="user-panel-name">{superAdmin.name}</strong>
       <p className="field-hint">Development sign-in with access to everything. Single sign-on from Entra ID will replace this; until then the super admin may act as any configured identity.</p>
       {identitiesError ? <p className="form-error" role="alert">{identitiesError}</p>
-        : <RecordPicker id="act-as" label="Act as identity" hint="Their profile and work queue show across the portal until you return." placeholder="Find an identity by name or ID" single options={identities} selected={user.superAdmin ? [] : [user.id]} onChange={(ids) => { onActAs(ids[0] ?? ""); setOpen(false); }} />}
+        : <RecordPicker id="act-as" label="Act as identity" hint="Their profile and work queue show across the portal until you return." placeholder="Find an identity by name or ID" single options={identities.filter((identity) => identity.id !== "platform-super-admin")} selected={user.superAdmin ? [] : [user.id]} onChange={(ids) => { onActAs(ids[0] ?? ""); setOpen(false); }} />}
       <div className="user-panel-actions">
         <button type="button" className="button button-quiet" onClick={() => { onGoHome(); setOpen(false); }}><House size={14} />My home</button>
         {!user.superAdmin && <button type="button" className="button button-quiet" onClick={() => { onActAs(""); setOpen(false); }}><Undo2 size={14} />Back to super admin</button>}

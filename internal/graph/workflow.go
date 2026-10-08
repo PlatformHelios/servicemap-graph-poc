@@ -589,6 +589,14 @@ func (s *Store) ActOnTask(ctx context.Context, taskID, actorID string, outcome c
 			return actOnAccessItem(ctx, tx, accessAction{taskID: taskID, actorID: actorID, runID: runID, requestID: requestID, workflowID: workflowID, stepOrder: stepOrder, timestamp: timestamp}, outcome)
 		}
 		switch {
+		case outcome.DenyRequest:
+			// A catalog approver said no: the request is denied and closed out
+			// with its run and tasks, like a fulfilled vendor request.
+			if _, err := runQuery(ctx, tx, "MATCH (task:Task {id: $taskId}), (run:WorkflowRun {id: $runId}), (request:Request {id: $requestId}) "+
+				"SET task.state = $rejected, task.completedAt = $now, run.state = $completed, run.completedAt = $now, request.state = $denied, request.deniedAt = $now, request.denyComment = $comment", map[string]any{"taskId": taskID, "runId": runID, "requestId": requestID, "rejected": string(cmdb.TaskRejected), "completed": string(cmdb.RunCompleted), "denied": string(cmdb.RequestDenied), "comment": outcome.Comment, "now": timestamp}); err != nil {
+				return err
+			}
+			return closeOutRun(ctx, tx, runID, requestID, timestamp)
 		case outcome.Return:
 			if _, err := runQuery(ctx, tx, "MATCH (task:Task {id: $taskId}), (run:WorkflowRun {id: $runId}), (request:Request {id: $requestId}) "+
 				"SET task.state = $rejected, task.completedAt = $now, run.state = $returned, run.completedAt = $now, request.state = $draft, request.returnComment = $comment, request.returnedAt = $now", map[string]any{"taskId": taskID, "runId": runID, "requestId": requestID, "rejected": string(cmdb.TaskRejected), "returned": string(cmdb.RunReturned), "draft": string(cmdb.RequestDraft), "comment": outcome.Comment, "now": timestamp}); err != nil {
@@ -615,6 +623,14 @@ func (s *Store) ActOnTask(ctx context.Context, taskID, actorID string, outcome c
 			}
 			if len(next) > 0 {
 				return createTask(ctx, tx, runID, fmt.Sprint(next[0].Values[0]), timestamp)
+			}
+			if outcome.Handoff {
+				// Catalog approvals done: the run and its tasks close, and the request
+				// stays open, in progress, while the team's workflow fulfils it.
+				if _, err := runQuery(ctx, tx, "MATCH (run:WorkflowRun {id: $runId}), (request:Request {id: $requestId}) SET run.state = $completed, run.completedAt = $now, request.state = $inProgress, request.approvedAt = $now", map[string]any{"runId": runID, "requestId": requestID, "completed": string(cmdb.RunCompleted), "inProgress": string(cmdb.RequestInProgress), "now": timestamp}); err != nil {
+					return err
+				}
+				return retireRun(ctx, tx, runID, timestamp)
 			}
 			// Last step done: the run completes and the request is fulfilled as a CI.
 			params := map[string]any{"runId": runID, "requestId": requestID, "completed": string(cmdb.RunCompleted), "fulfilled": string(cmdb.RequestFulfilled), "now": timestamp}

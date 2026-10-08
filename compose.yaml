@@ -2,11 +2,11 @@
 #
 #   podman compose up -d             everything; api and web always pull the newest published :latest
 #   podman compose up -d --build     everything, with api and web built from the working tree instead
-#   podman compose up -d neo4j otel-collector loki prometheus grafana kafka
+#   podman compose up -d neo4j otel-collector loki prometheus grafana kafka temporal
 #                                    prerequisites only, to run the apps on the host
 #
 # (docker compose works the same way.) Containers reach each other by service
-# name (neo4j:7687, otel-collector:4318, kafka:19092), not localhost.
+# name (neo4j:7687, otel-collector:4318, kafka:19092, temporal:7233), not localhost.
 name: servicemap
 
 services:
@@ -20,12 +20,16 @@ services:
       NEO4J_PASSWORD: ${NEO4J_PASSWORD:-your_password}
       OTEL_SERVICE_NAME: servicemap-graph-poc
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      TEMPORAL_ADDRESS: temporal:7233 # Service Catalog automation
+      TEMPORAL_UI_URL: http://localhost:8233 # links from the Workflow Analyzer
     ports:
       - "127.0.0.1:8080:8080" # API, Swagger UI, and the embedded dashboard
     depends_on:
       neo4j:
         condition: service_healthy
       otel-collector:
+        condition: service_started
+      temporal:
         condition: service_started
     restart: unless-stopped
 
@@ -136,6 +140,19 @@ services:
       - "9092:9092"
     restart: unless-stopped
 
+  # Temporal development server (single process, SQLite) for Service Catalog
+  # automation. Teams' workers and the API's catalog worker connect on 7233;
+  # the Temporal UI is on 8233.
+  temporal:
+    image: docker.io/temporalio/temporal:1.9.1
+    command: ["server", "start-dev", "--ip", "0.0.0.0", "--db-filename", "/data/temporal.db"]
+    volumes:
+      - temporal-data:/data
+    ports:
+      - "7233:7233" # gRPC frontend
+      - "8233:8233" # Temporal UI
+    restart: unless-stopped
+
 volumes:
   neo4j-data:
   neo4j-logs:
@@ -143,3 +160,4 @@ volumes:
   prometheus-data:
   grafana-data:
   kafka-data:
+  temporal-data:
