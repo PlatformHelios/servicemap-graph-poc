@@ -9,11 +9,11 @@
 # workflow_run triggers only fire from the copy of this file on the default
 # branch, so automatic deploys start once this is merged to main.
 #
-# One-time setup, as repository or "aks" environment secrets (variables also
+# One-time setup, as repository or "dev" environment secrets (variables also
 # work for the Azure/AKS values, but their values show in the public run log):
 #   secrets  AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID
 #            (an Entra app or managed identity with a federated credential for
-#            repo:<owner>/<repo>:environment:aks, and the "Azure Kubernetes
+#            repo:<owner>/<repo>:environment:dev, and the "Azure Kubernetes
 #            Service Cluster User Role" plus deploy rights in the cluster),
 #            AKS_RESOURCE_GROUP, AKS_CLUSTER_NAME
 #            NEO4J_PASSWORD     the Neo4j password (read by Neo4j on first start only)
@@ -76,7 +76,7 @@ jobs:
        github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push')
     runs-on: ubuntu-latest
-    environment: aks
+    environment: dev
     permissions:
       contents: read
       id-token: write # OIDC sign-in to Azure
@@ -123,7 +123,7 @@ jobs:
           GHCR_USER: ${{ github.repository_owner }}
         run: |
           if [ -z "$NEO4J_PASSWORD" ]; then
-            echo "::error::Set the NEO4J_PASSWORD secret in the aks environment"
+            echo "::error::Set the NEO4J_PASSWORD secret (repository or dev environment)"
             exit 1
           fi
           kubectl apply -f deploy/k8s/namespace.yaml
