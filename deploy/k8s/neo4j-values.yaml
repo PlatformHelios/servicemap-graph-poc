@@ -1,0 +1,27 @@
+# Values for the official Neo4j Helm chart (https://helm.neo4j.com/neo4j):
+#
+#   helm upgrade --install neo4j neo4j/neo4j -n servicemap -f deploy/k8s/neo4j-values.yaml
+#
+# With release name "neo4j" the chart's ClusterIP service is neo4j:7687,
+# which is what api.yaml connects to.
+neo4j:
+  name: neo4j
+  edition: community
+  # Secret "neo4j-auth", key NEO4J_AUTH=neo4j/<password>. Neo4j reads it only on
+  # first start; changing it later does not change the database password.
+  passwordFromSecret: neo4j-auth
+  resources:
+    cpu: "1"
+    memory: 2Gi
+volumes:
+  data:
+    mode: defaultStorageClass
+    defaultStorageClass:
+      requests:
+        storage: 20Gi
+services:
+  neo4j:
+    enabled: false # the chart's public LoadBalancer; keep Neo4j cluster-internal
+# The chart prints the password in its install notes by default, which would
+# put it in the (public) GitHub Actions log.
+logInitialPassword: false
