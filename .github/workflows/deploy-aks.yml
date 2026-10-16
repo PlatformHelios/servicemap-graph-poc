@@ -59,11 +59,13 @@ jobs:
       - name: Render kustomization
         run: kubectl kustomize deploy/k8s > /dev/null
 
+      # No cluster here, so turn off the chart's lookups (e.g. its check that
+      # the neo4j-auth secret exists), which would otherwise always fail.
       - name: Render Neo4j chart
         run: |
           helm repo add neo4j https://helm.neo4j.com/neo4j
           helm template neo4j neo4j/neo4j --version "$NEO4J_CHART_VERSION" \
-            -n "$NAMESPACE" -f deploy/k8s/neo4j-values.yaml > /dev/null
+            -n "$NAMESPACE" -f deploy/k8s/neo4j-values.yaml --set disableLookups=true > /dev/null
 
   deploy:
     name: Deploy
