@@ -15,8 +15,6 @@ spec:
       labels:
         app.kubernetes.io/name: servicemap-web
     spec:
-      imagePullSecrets:
-        - name: ghcr # optional; the deploy workflow creates it when GHCR_PULL_TOKEN is set
       securityContext:
         runAsNonRoot: true
         seccompProfile:
