@@ -9,13 +9,14 @@
 # workflow_run triggers only fire from the copy of this file on the default
 # branch, so automatic deploys start once this is merged to main.
 #
-# One-time setup, all in the "aks" GitHub environment:
-#   vars     AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID
+# One-time setup, as repository or "aks" environment secrets (variables also
+# work for the Azure/AKS values, but their values show in the public run log):
+#   secrets  AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID
 #            (an Entra app or managed identity with a federated credential for
 #            repo:<owner>/<repo>:environment:aks, and the "Azure Kubernetes
 #            Service Cluster User Role" plus deploy rights in the cluster),
 #            AKS_RESOURCE_GROUP, AKS_CLUSTER_NAME
-#   secrets  NEO4J_PASSWORD     the Neo4j password (read by Neo4j on first start only)
+#            NEO4J_PASSWORD     the Neo4j password (read by Neo4j on first start only)
 #            GHCR_PULL_TOKEN    optional; a read:packages token if the GHCR images are private
 name: Deploy to AKS
 
@@ -98,9 +99,9 @@ jobs:
 
       - uses: azure/login@v2
         with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ secrets.AZURE_CLIENT_ID || vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID || vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID || vars.AZURE_SUBSCRIPTION_ID }}
 
       - uses: azure/use-kubelogin@v1
         with:
@@ -108,8 +109,8 @@ jobs:
 
       - uses: azure/aks-set-context@v4
         with:
-          resource-group: ${{ vars.AKS_RESOURCE_GROUP }}
-          cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
+          resource-group: ${{ secrets.AKS_RESOURCE_GROUP || vars.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ secrets.AKS_CLUSTER_NAME || vars.AKS_CLUSTER_NAME }}
           admin: false
           use-kubelogin: true
 
