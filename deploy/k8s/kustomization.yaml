@@ -1,0 +1,24 @@
+# AKS deployment of servicemap: api, web, and a Temporal dev server.
+# Neo4j is installed separately from its Helm chart with neo4j-values.yaml.
+#
+#   kubectl apply -k deploy/k8s
+#
+# The deploy workflow (.github/workflows/deploy-aks.yml) pins the image tags
+# below with `kustomize edit set image` before applying.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: servicemap
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: servicemap
+resources:
+  - namespace.yaml
+  - temporal.yaml
+  - api.yaml
+  - web.yaml
+  # ingress.yaml is opt-in: read the warning in that file first.
+images:
+  - name: ghcr.io/platformhelios/servicemap-api
+    newTag: latest
+  - name: ghcr.io/platformhelios/servicemap-web
+    newTag: latest
