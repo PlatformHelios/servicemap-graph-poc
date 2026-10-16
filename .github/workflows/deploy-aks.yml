@@ -17,7 +17,7 @@
 #            Service Cluster User Role" plus deploy rights in the cluster),
 #            AKS_RESOURCE_GROUP, AKS_CLUSTER_NAME
 #            NEO4J_PASSWORD     the Neo4j password (read by Neo4j on first start only)
-#            GHCR_PULL_TOKEN    optional; a read:packages token if the GHCR images are private
+# The GHCR images are public, so the cluster needs no pull secret.
 name: Deploy to AKS
 
 on:
@@ -103,9 +103,10 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID || vars.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID || vars.AZURE_SUBSCRIPTION_ID }}
 
+      # Pinned: "latest" needs a GITHUB_TOKEN to resolve the release.
       - uses: azure/use-kubelogin@v1
         with:
-          kubelogin-version: latest
+          kubelogin-version: v0.2.21
 
       - uses: azure/aks-set-context@v4
         with:
@@ -119,8 +120,6 @@ jobs:
       - name: Namespace and secrets
         env:
           NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}
-          GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
-          GHCR_USER: ${{ github.repository_owner }}
         run: |
           if [ -z "$NEO4J_PASSWORD" ]; then
             echo "::error::Set the NEO4J_PASSWORD secret (repository or dev environment)"
@@ -132,12 +131,6 @@ jobs:
             --from-literal=NEO4J_PASSWORD="$NEO4J_PASSWORD" \
             --from-literal=NEO4J_AUTH="neo4j/$NEO4J_PASSWORD" \
             --dry-run=client -o yaml | kubectl apply -f -
-          if [ -n "$GHCR_PULL_TOKEN" ]; then
-            kubectl -n "$NAMESPACE" create secret docker-registry ghcr \
-              --docker-server=ghcr.io --docker-username="$GHCR_USER" \
-              --docker-password="$GHCR_PULL_TOKEN" \
-              --dry-run=client -o yaml | kubectl apply -f -
-          fi
 
       - name: Neo4j
         run: |
