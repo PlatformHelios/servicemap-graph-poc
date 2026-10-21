@@ -5,8 +5,19 @@ import { clampPage, defaultPageSize, Pager } from "./Pager";
 import { titleCase } from "./RecordPicker";
 import { AgreementMeter } from "./AgreementMeter";
 import { formatWhen, itemDecisionLabel, itemDecisionPillClass, requestFieldLabel, requestFieldLabels, requestStateOf, requestStatePillClass, taskStatusPillClass } from "./workflows";
-import type { SessionUser } from "./session";
+import { superAdmin, type SessionUser } from "./session";
 import type { GraphNode, Metadata, Properties, RequestType, TaskAction, TaskView } from "./types";
+
+// A catalog request's inputs are stored as JSON on the request.
+function parseInputs(value: unknown): Record<string, unknown> {
+  if (typeof value !== "string" || !value) return {};
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
+}
 
 // Unknown request types fall back to the vendor form so the task still renders.
 function requestTypeOf(task: TaskView): RequestType {
@@ -60,7 +71,7 @@ export default function WorkflowTasks({ user, metadata, reload, onNotify, onOpen
 
   return <>
     <section className="records-section" aria-label="Tasks">
-      <div className="ci-picker-heading saved-requests-heading"><div><h3>{user.superAdmin ? "All tasks on the platform" : `Tasks for ${user.name}`}</h3></div><span className="ci-selection-count">{`${pending} pending${includeDone && total > defaultPageSize ? " on this page" : ""}`}{user.superAdmin ? " · act as an identity from the user menu to work a task" : ""}</span></div>
+      <div className="ci-picker-heading saved-requests-heading"><div><h3>{user.superAdmin ? "All tasks on the platform" : `Tasks for ${user.name}`}</h3></div><span className="ci-selection-count">{`${pending} pending${includeDone && total > defaultPageSize ? " on this page" : ""}`}{user.superAdmin ? " · as super admin you may act on any of them" : ""}</span></div>
       <div className="records-toolbar"><span className="secondary-value"><Pager page={page} total={total} loading={loading} noun="task" onPage={setPage} /></span><label className="retired-toggle"><input type="checkbox" checked={includeDone} onChange={(event) => setIncludeDone(event.target.checked)} /><span>Include completed</span></label></div>
       {includeDone && <p className="field-hint saved-requests-heading">Completed tasks stay here as history; once a workflow finishes they, their run, and the request are retired.</p>}
       <div className="table-frame">
@@ -84,7 +95,7 @@ export default function WorkflowTasks({ user, metadata, reload, onNotify, onOpen
       </div>
     </section>
 
-    {selected && <TaskDialog key={selected.id} task={selected} actorId={actorId} metadata={metadata} onClose={() => setSelected(null)} onOpenRequest={onOpenRequest} onDone={(message) => { setSelected(null); onNotify(message); setListReload((value) => value + 1); }} />}
+    {selected && <TaskDialog key={selected.id} task={selected} actorId={user.superAdmin ? superAdmin.id : actorId} metadata={metadata} onClose={() => setSelected(null)} onOpenRequest={onOpenRequest} onDone={(message) => { setSelected(null); onNotify(message); setListReload((value) => value + 1); }} />}
   </>;
 }
 
@@ -99,20 +110,26 @@ export function TaskDialog({ task, actorId, metadata, onClose, onOpenRequest, on
   const [error, setError] = useState("");
   const [acting, setActing] = useState(false);
   const pending = task.status === "pending";
-  const eligible = task.eligibleActors.some((candidate) => candidate.id === actorId);
+  // The super admin may act on any task; its approval settles the step.
+  const overriding = actorId === superAdmin.id;
+  const eligible = overriding || task.eligibleActors.some((candidate) => candidate.id === actorId);
   const alreadyApproved = task.actions.some((action) => action.actorId === actorId && action.action === "approved");
   const canAct = pending && eligible && !alreadyApproved;
   const requestState = requestStateOf(task.request);
   // Access tasks are about one requested role or entitlement: the approval step
   // approves or denies it, and the fulfilment step records it as provisioned.
   const isAccess = requestType === "access";
+  // Catalog approvals decide the whole request: approving the last one hands it
+  // to the owning team's workflow, denying it closes it.
+  const isCatalog = requestType === "catalog";
+  const catalogInputs = isCatalog ? parseInputs(requestProperties.inputs) : {};
   const item = task.item;
   const approvalStep = task.step.stepType === "approval";
 
   async function act(action: TaskAction) {
-    if (action === "reject" && !comment.trim()) { setError(isAccess ? "Give the reason for denying this access before continuing." : "Explain what the requester needs to change before returning the request."); return; }
+    if (action === "reject" && !comment.trim()) { setError(isAccess || isCatalog ? `Give the reason for denying this ${isAccess ? "access" : "request"} before continuing.` : "Explain what the requester needs to change before returning the request."); return; }
     const properties: Properties = {};
-    if (action !== "reject" && !isAccess) {
+    if (action !== "reject" && !isAccess && !isCatalog) {
       for (const key of editable) {
         const value = values[key];
         const text = typeof value === "string" ? value.trim() : value;
@@ -135,6 +152,10 @@ export function TaskDialog({ task, actorId, metadata, onClose, onOpenRequest, on
           : fulfilled ? `${itemName} provisioned and the permission recorded; the request is complete and retired.` : `${itemName} provisioned and the permission recorded; other items are still in progress.`);
         return;
       }
+      if (isCatalog) {
+        onDone(action === "reject" ? "Request denied and closed." : resultState === "in-progress" ? "Approved: the request was handed to the owning team's workflow." : resultState === "failed" ? `Approved, but the team's workflow could not start: ${String(result.request.properties?.failureReason ?? "unknown error")}` : result.status === "pending" ? "Approval recorded; the step is waiting on other approvers." : "Step approved; the next approval was raised.");
+        return;
+      }
       onDone(action === "reject" ? "Request returned to the requester." : fulfilled ? "Request fulfilled: the vendor CI was created and the request, run, and tasks were retired." : result.status === "pending" ? "Approval recorded; the step is waiting on other approvers." : action === "approve" ? "Step approved." : "Step completed.");
     } catch (actError) {
       setError(actError instanceof Error ? actError.message : "Could not act on this task.");
@@ -147,7 +168,7 @@ export function TaskDialog({ task, actorId, metadata, onClose, onOpenRequest, on
     <section className="editor-dialog task-dialog" role="dialog" aria-modal="true" aria-labelledby="task-title">
       <form onSubmit={(event) => { event.preventDefault(); void act(task.step.stepType === "approval" ? "approve" : "complete"); }}>
         <div className="dialog-heading">
-          <div><p className="eyebrow">{task.status.toUpperCase()} TASK · {task.id}</p><h2 id="task-title">{task.step.order}. {task.step.name}{item ? ` · ${item.name ?? item.id}` : ""}</h2><p className="page-subtitle">{titleCase(task.step.stepType)} step of {task.workflowName}{isAccess ? (approvalStep ? " · approve or deny this one item" : " · completing it records the permission on the identity") : `${task.step.stepType === "approval" ? ` · ${task.step.approvalRule === "all" ? "every eligible approver must approve" : "any one approver"}` : ""}${task.finalStep ? " · completing it creates the vendor CI" : ""}`}</p></div>
+          <div><p className="eyebrow">{task.status.toUpperCase()} TASK · {task.id}</p><h2 id="task-title">{task.step.order}. {task.step.name}{item ? ` · ${item.name ?? item.id}` : ""}</h2><p className="page-subtitle">{titleCase(task.step.stepType)} step of {task.workflowName}{isAccess ? (approvalStep ? " · approve or deny this one item" : " · completing it records the permission on the identity") : `${task.step.stepType === "approval" ? ` · ${task.step.approvalRule === "all" ? "every eligible approver must approve" : "any one approver"}` : ""}${task.finalStep ? (isCatalog ? " · approving it starts the owning team's workflow" : " · completing it creates the vendor CI") : ""}`}</p></div>
           <button className="close-button" type="button" onClick={onClose} aria-label="Close"><X size={17} /></button>
         </div>
         {task.step.instructions && <p className="system-generated-id">{task.step.instructions}</p>}
@@ -168,6 +189,9 @@ export function TaskDialog({ task, actorId, metadata, onClose, onOpenRequest, on
                 <div className="secondary-value">{sibling.id} · {titleCase(sibling.kind)}{sibling.applicationName ? ` in ${sibling.applicationName}` : ""}{sibling.decidedBy ? ` · ${sibling.decision === "denied" ? "denied" : "approved"} by ${sibling.decidedBy}` : ""}</div>
               </li>)}</ol>
             </>}
+          </> : isCatalog ? <>
+            <p className="field-hint">{String(requestProperties.catalogItem ?? "Catalog")} v{String(requestProperties.catalogItemVersion ?? "?")}, raised by {task.requester?.name ?? task.requester?.id ?? "an unknown requester"}{typeof requestProperties.submittedAt === "string" ? `, submitted ${formatWhen(requestProperties.submittedAt)}` : ""}. The requester's answers are fixed once submitted.</p>
+            <div className="field-grid">{Object.entries(catalogInputs).map(([key, value]) => <div className="form-field" key={key}><label>{titleCase(key)}</label><input value={String(value)} readOnly /></div>)}</div>
           </> : <>
           <p className="field-hint">Raised by {task.requester?.name ?? task.requester?.id ?? "an unknown requester"}{typeof requestProperties.submittedAt === "string" ? `, submitted ${formatWhen(requestProperties.submittedAt)}` : ""}. {editable.length > 0 ? "Fields this step may change are open for entry." : "This step reviews the form as it stands."}</p>
           <div className="field-grid">{fieldKeys.map((key) => {
@@ -195,14 +219,15 @@ export function TaskDialog({ task, actorId, metadata, onClose, onOpenRequest, on
           {task.actions.length > 0 && <ol className="task-trail">{task.actions.map((action, index) => <li className={`task-trail-item task-${action.action}`} key={index}><div className="task-trail-action"><span>{titleCase(action.action)} by {action.actorName ?? action.actorId} · {formatWhen(action.actedAt)}</span>{action.comment && <p>{action.comment}</p>}</div></li>)}</ol>}
         </section>
 
-        {canAct && <div className="form-field"><label htmlFor="task-comment">Comment</label><textarea id="task-comment" rows={3} value={comment} onChange={(event) => setComment(event.target.value)} placeholder={isAccess ? (approvalStep ? "Optional when approving; required when denying." : "Optional, e.g. where the access was provisioned.") : task.step.stepType === "approval" ? "Optional when approving; required when returning the request." : "Optional when completing; required when returning the request."} /></div>}
+        {canAct && <div className="form-field"><label htmlFor="task-comment">Comment</label><textarea id="task-comment" rows={3} value={comment} onChange={(event) => setComment(event.target.value)} placeholder={isCatalog ? "Optional when approving; required when denying." : isAccess ? (approvalStep ? "Optional when approving; required when denying." : "Optional, e.g. where the access was provisioned.") : task.step.stepType === "approval" ? "Optional when approving; required when returning the request." : "Optional when completing; required when returning the request."} /></div>}
         {!pending && <p className="field-hint">This task is {task.status}; nothing further can be done here.</p>}
-        {pending && !eligible && <p className="form-error" role="alert">{actorId ? "The identity you are acting as is not eligible for this task." : "The super admin does not act on tasks directly: use the user menu to act as one of the eligible identities."}</p>}
+        {pending && overriding && <p className="field-hint">You are acting as the platform super admin, which may act on any task. It is recorded as {superAdmin.name}, and an approval settles the step even when every assignee would otherwise have to approve.</p>}
+        {pending && !eligible && <p className="form-error" role="alert">The identity you are acting as is not eligible for this task.</p>}
         {pending && alreadyApproved && <p className="field-hint">You have already approved this step; it is waiting on the other approvers.</p>}
         {error && <p className="form-error" role="alert">{error}</p>}
         <div className="dialog-actions">
           <button className="button button-quiet" type="button" onClick={onClose}>Close</button>
-          {canAct && (!isAccess || approvalStep) && <button className="button button-danger" type="button" disabled={acting} onClick={() => void act("reject")}>{isAccess ? "Deny" : "Return to requester"}</button>}
+          {canAct && (!isAccess || approvalStep) && <button className="button button-danger" type="button" disabled={acting} onClick={() => void act("reject")}>{isAccess || isCatalog ? "Deny" : "Return to requester"}</button>}
           {canAct && <button className="button button-primary" type="submit" disabled={acting}>{acting ? "Working…" : approvalStep ? "Approve" : isAccess ? "Mark provisioned" : "Complete step"}</button>}
         </div>
       </form>

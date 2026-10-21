@@ -1,0 +1,86 @@
+# API, Swagger UI, and the embedded dashboard. It also runs the Service Catalog
+# Temporal worker and the access-anomaly ticker, so it stays at one replica
+# until those background jobs are known to be safe to run more than once.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: servicemap-api
+  labels:
+    app.kubernetes.io/name: servicemap-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: servicemap-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: servicemap-api
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: ghcr.io/platformhelios/servicemap-api
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: NEO4J_URI
+              value: bolt://neo4j:7687
+            - name: NEO4J_USERNAME
+              value: neo4j
+            - name: NEO4J_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: neo4j-auth
+                  key: NEO4J_PASSWORD
+            - name: TEMPORAL_ADDRESS
+              value: temporal:7233
+            - name: TEMPORAL_UI_URL
+              value: http://localhost:8233 # via kubectl port-forward svc/temporal 8233
+          # Startup waits on Neo4j schema setup; allow up to 5 minutes.
+          startupProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 10
+            failureThreshold: 30
+          # /api/health queries Neo4j: right for readiness, but as a liveness
+          # probe a Neo4j outage would restart healthy pods.
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: servicemap-api
+  labels:
+    app.kubernetes.io/name: servicemap-api
+spec:
+  selector:
+    app.kubernetes.io/name: servicemap-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

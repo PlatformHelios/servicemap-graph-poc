@@ -5,13 +5,14 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"syscall"
 
 	"github.com/PlatformHelios/servicemap-graph-poc/internal/cli"
 	"github.com/PlatformHelios/servicemap-graph-poc/internal/httpapi"
 )
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	args := os.Args[1:]
 	if len(args) > 0 && args[0] == "serve" {

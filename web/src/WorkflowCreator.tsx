@@ -79,6 +79,10 @@ export default function WorkflowCreator({ metadata, reload, onNotify }: { metada
   // The access workflow is a system workflow: its steps are fixed, and only the
   // fulfilment step's assignees (plus names and instructions) can be changed.
   const locked = draft.requestType === "access";
+  // Catalog approval workflows are generated when a team publishes a catalog
+  // item; they are shown here for reference and change only by republishing.
+  const generated = draft.requestType === "catalog";
+  const formChoices = requestTypes.includes(draft.requestType) ? requestTypes : [...requestTypes, draft.requestType];
   const fieldKeys = metadata?.requestFields?.[draft.requestType] ?? Object.keys(requestFieldLabels[draft.requestType] ?? {});
   const fulfilmentKeys = metadata?.fulfilmentFields?.[draft.requestType] ?? [];
   const uncollected = fulfilmentKeys.filter((key) => !draft.steps.some((step) => step.requiredFields?.includes(key)));
@@ -195,10 +199,12 @@ export default function WorkflowCreator({ metadata, reload, onNotify }: { metada
           </div>
           {!editing && !loading && workflows.length > 0 && <p className="system-generated-id">{workflows.length - retiredCount} saved {workflows.length - retiredCount === 1 ? "workflow" : "workflows"}{retiredCount > 0 ? ` and ${retiredCount} retired` : ""} are listed below this form. <button type="button" className="link-button" onClick={() => document.querySelector(".saved-workflows")?.scrollIntoView({ behavior: "smooth", block: "start" })}>Jump to saved workflows</button> to reopen one.</p>}
           {retired && <p className="system-generated-id">This workflow is retired, so it cannot be changed or enabled. <button type="button" className="link-button" onClick={copyWorkflow}>Create a copy</button> to continue from its steps as a new workflow.</p>}
+          {generated && <p className="system-generated-id">This approval workflow was generated from a Service Catalog item when its owning team published it. It is read-only here: the team changes it by publishing a new version of the item, which replaces this workflow and disables it for new requests.</p>}
+          <fieldset className="plain-fieldset" disabled={generated}>
           {locked && !retired && <p className="system-generated-id">The Access Request Form runs a system workflow: every requested role or entitlement goes to its Accountable owner, and approved items go to the fulfilment team. The steps are fixed; choose who fulfils access at step 2 and enable the workflow so requests can be submitted.</p>}
           <div className="field-grid">
             <div className="form-field"><label htmlFor="workflow-form">Catalog form</label>
-              <select id="workflow-form" value={draft.requestType} disabled={editing} onChange={(event) => { const requestType = event.target.value as RequestType; setDraft((current) => requestType === "access" || current.requestType === "access" ? newWorkflow(requestType, metadata) : { ...current, requestType }); setFormError(""); }}>{requestTypes.map((type) => <option key={type} value={type}>{formTitles[type] ?? titleCase(type)}</option>)}</select>
+              <select id="workflow-form" value={draft.requestType} disabled={editing} onChange={(event) => { const requestType = event.target.value as RequestType; setDraft((current) => requestType === "access" || current.requestType === "access" ? newWorkflow(requestType, metadata) : { ...current, requestType }); setFormError(""); }}>{formChoices.map((type) => <option key={type} value={type}>{formTitles[type] ?? titleCase(type)}</option>)}</select>
               <span className="field-hint">{editing ? "The form a workflow serves is fixed once it is created." : "Submitting this form starts the workflow when it is enabled."}</span></div>
             <div className="form-field"><label htmlFor="workflow-name">Workflow name</label><input id="workflow-name" autoComplete="off" value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} /></div>
             <div className="form-field full-width"><label htmlFor="workflow-description">Description</label><textarea id="workflow-description" rows={2} value={draft.description ?? ""} onChange={(event) => setDraft((current) => ({ ...current, description: event.target.value }))} /></div>
@@ -261,12 +267,13 @@ export default function WorkflowCreator({ metadata, reload, onNotify }: { metada
             </li>)}</ol>
             {!locked && <button className="attribute-add" type="button" onClick={() => setDraft((current) => ({ ...current, steps: [...current.steps, newStep()] }))}><Plus size={14} />Add step</button>}
           </section>
+          </fieldset>
 
           {formError && <p className="form-error" role="alert">{formError}</p>}
           <div className="dialog-actions">
-            {editing && <button className="button button-quiet" type="button" onClick={() => { setDraft(newWorkflow(requestTypes[0], metadata)); setFormError(""); }}>Discard changes</button>}
-            {editing && !retired && <button className="button button-quiet" type="button" onClick={() => setRetiring(definitionFrom(draft))}><Archive size={14} />Retire workflow</button>}
-            {!retired && <button className="button button-primary" type="submit" disabled={saving}>{saving ? "Saving…" : editing ? "Save workflow" : "Create workflow"}</button>}
+            {editing && <button className="button button-quiet" type="button" onClick={() => { setDraft(newWorkflow(requestTypes[0], metadata)); setFormError(""); }}>{generated ? "Close" : "Discard changes"}</button>}
+            {editing && !retired && !generated && <button className="button button-quiet" type="button" onClick={() => setRetiring(definitionFrom(draft))}><Archive size={14} />Retire workflow</button>}
+            {!retired && !generated && <button className="button button-primary" type="submit" disabled={saving}>{saving ? "Saving…" : editing ? "Save workflow" : "Create workflow"}</button>}
           </div>
         </form>
       </section>
@@ -286,8 +293,8 @@ export default function WorkflowCreator({ metadata, reload, onNotify }: { metada
             <td>{workflow.enabled ? <span className="status-pill status-active">enabled</span> : <span className="status-pill status-draft">disabled</span>}</td>
             <td><span className={`status-pill status-${workflow.status ?? "active"}`}>{workflow.status ?? "active"}</span></td>
             <td><div className="row-actions">
-              <button className="action-button" onClick={() => { setDraft(draftFrom(workflow)); setFormError(""); document.querySelector(".request-form-panel")?.scrollIntoView({ behavior: "smooth", block: "start" }); }} title={workflow.status === "retired" ? "Open workflow" : "Edit workflow"}><Pencil size={14} /><span>{workflow.status === "retired" ? "Open" : "Edit"}</span></button>
-              {workflow.status !== "retired" && <button className="action-button retire" onClick={() => setRetiring(workflow)} title="Retire workflow"><Archive size={14} /><span>Retire</span></button>}
+              <button className="action-button" onClick={() => { setDraft(draftFrom(workflow)); setFormError(""); document.querySelector(".request-form-panel")?.scrollIntoView({ behavior: "smooth", block: "start" }); }} title={workflow.status === "retired" || workflow.requestType === "catalog" ? "Open workflow" : "Edit workflow"}><Pencil size={14} /><span>{workflow.status === "retired" || workflow.requestType === "catalog" ? "Open" : "Edit"}</span></button>
+              {workflow.status !== "retired" && workflow.requestType !== "catalog" && <button className="action-button retire" onClick={() => setRetiring(workflow)} title="Retire workflow"><Archive size={14} /><span>Retire</span></button>}
             </div></td>
           </tr>)}</tbody>
         </table>

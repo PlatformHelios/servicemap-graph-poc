@@ -140,7 +140,21 @@ func (s *Store) EnsureConstraints(ctx context.Context) error {
 	if err := s.runMigration(ctx, "retired-relationship-types", s.moveRetiredRelationships); err != nil {
 		return err
 	}
-	return s.ensureIndexes(ctx)
+	if err := s.ensureIndexes(ctx); err != nil {
+		return err
+	}
+	return s.ensureSuperAdminIdentity(ctx)
+}
+
+// ensureSuperAdminIdentity keeps an Identity record for the platform super
+// admin, so its approvals, requests, and other actions link to a person like
+// everyone else's.
+func (s *Store) ensureSuperAdminIdentity(ctx context.Context) error {
+	if _, err := s.execute(ctx, true, "MERGE (admin:Identity {id: $id}) ON CREATE SET admin.name = $name, admin.title = $title, admin.createdAt = $now "+
+		"SET admin.status = 'active' REMOVE admin.retiredAt", map[string]any{"id": cmdb.PlatformSuperAdminID, "name": cmdb.PlatformSuperAdminName, "title": "Platform administrator (system account)", "now": now()}); err != nil {
+		return fmt.Errorf("ensure super admin identity: %w", err)
+	}
+	return nil
 }
 
 // runMigration applies a data migration once, recording a CMDBMigration

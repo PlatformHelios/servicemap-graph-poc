@@ -1,0 +1,160 @@
+# Deploys servicemap to AKS from the images built by images.yml.
+#
+#   pull request     validate only: render the manifests and the Neo4j chart
+#   images on main   after "Container images" succeeds on a push to main,
+#                    deploy that commit's :sha-<short> images
+#   manual run       deploy the given image tag (default: :sha-<short> of the
+#                    selected commit, which must already be built)
+#
+# workflow_run triggers only fire from the copy of this file on the default
+# branch, so automatic deploys start once this is merged to main.
+#
+# One-time setup, as repository or "dev" environment secrets (variables also
+# work for the Azure/AKS values, but their values show in the public run log):
+#   secrets  AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID
+#            (an Entra app or managed identity with a federated credential for
+#            repo:<owner>/<repo>:environment:dev, and the "Azure Kubernetes
+#            Service Cluster User Role" plus deploy rights in the cluster),
+#            AKS_RESOURCE_GROUP, AKS_CLUSTER_NAME
+#            NEO4J_PASSWORD     the Neo4j password (read by Neo4j on first start only)
+# The GHCR images are public, so the cluster needs no pull secret.
+name: Deploy to AKS
+
+on:
+  workflow_run:
+    workflows: ["Container images"]
+    types: [completed]
+    branches: [main]
+  pull_request:
+    paths:
+      - deploy/k8s/**
+      - .github/workflows/deploy-aks.yml
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Image tag to deploy, e.g. sha-2ae6343 or 1.2.3 (default sha-<short> of the selected commit)
+        required: false
+
+concurrency:
+  group: deploy-aks-${{ github.event_name == 'pull_request' && github.ref || 'aks' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  NAMESPACE: servicemap
+  NEO4J_CHART_VERSION: 2026.9.0 # keep in step with the neo4j image in compose.yaml
+  IMAGE_PREFIX: ghcr.io/platformhelios
+
+jobs:
+  validate:
+    name: Validate manifests
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: azure/setup-helm@v4
+
+      - name: Render kustomization
+        run: kubectl kustomize deploy/k8s > /dev/null
+
+      # No cluster here, so turn off the chart's lookups (e.g. its check that
+      # the neo4j-auth secret exists), which would otherwise always fail.
+      - name: Render Neo4j chart
+        run: |
+          helm repo add neo4j https://helm.neo4j.com/neo4j
+          helm template neo4j neo4j/neo4j --version "$NEO4J_CHART_VERSION" \
+            -n "$NAMESPACE" -f deploy/k8s/neo4j-values.yaml --set disableLookups=true > /dev/null
+
+  deploy:
+    name: Deploy
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    environment: dev
+    permissions:
+      contents: read
+      id-token: write # OIDC sign-in to Azure
+    steps:
+      - name: Resolve commit and image tag
+        id: target
+        env:
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          INPUT_TAG: ${{ inputs.image_tag }}
+        run: |
+          sha="${RUN_SHA:-$GITHUB_SHA}"
+          tag="${INPUT_TAG:-sha-${sha::7}}"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Deploying $tag (manifests from $sha)" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.target.outputs.sha }}
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID || vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID || vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID || vars.AZURE_SUBSCRIPTION_ID }}
+
+      # Pinned: "latest" needs a GITHUB_TOKEN to resolve the release.
+      - uses: azure/use-kubelogin@v1
+        with:
+          kubelogin-version: v0.2.21
+
+      - uses: azure/aks-set-context@v4
+        with:
+          resource-group: ${{ secrets.AKS_RESOURCE_GROUP || vars.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ secrets.AKS_CLUSTER_NAME || vars.AKS_CLUSTER_NAME }}
+          admin: false
+          use-kubelogin: true
+
+      - uses: azure/setup-helm@v4
+
+      - name: Namespace and secrets
+        env:
+          NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}
+        run: |
+          if [ -z "$NEO4J_PASSWORD" ]; then
+            echo "::error::Set the NEO4J_PASSWORD secret (repository or dev environment)"
+            exit 1
+          fi
+          kubectl apply -f deploy/k8s/namespace.yaml
+          # Rendered client-side and piped, so values never appear in the log.
+          kubectl -n "$NAMESPACE" create secret generic neo4j-auth \
+            --from-literal=NEO4J_PASSWORD="$NEO4J_PASSWORD" \
+            --from-literal=NEO4J_AUTH="neo4j/$NEO4J_PASSWORD" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Neo4j
+        run: |
+          helm repo add neo4j https://helm.neo4j.com/neo4j
+          helm upgrade --install neo4j neo4j/neo4j --version "$NEO4J_CHART_VERSION" \
+            -n "$NAMESPACE" -f deploy/k8s/neo4j-values.yaml --wait --timeout 10m
+
+      - name: Temporal, api, and web
+        env:
+          TAG: ${{ steps.target.outputs.tag }}
+        run: |
+          cd deploy/k8s
+          kustomize edit set image \
+            "$IMAGE_PREFIX/servicemap-api=$IMAGE_PREFIX/servicemap-api:$TAG" \
+            "$IMAGE_PREFIX/servicemap-web=$IMAGE_PREFIX/servicemap-web:$TAG"
+          kubectl apply -k .
+          kubectl -n "$NAMESPACE" rollout status deployment/temporal --timeout 5m
+          kubectl -n "$NAMESPACE" rollout status deployment/servicemap-api --timeout 10m
+          kubectl -n "$NAMESPACE" rollout status deployment/servicemap-web --timeout 5m
+
+      # Run logs are public for a public repo: no pod IPs or application logs
+      # here. Read those with kubectl from a machine that has cluster access.
+      - name: Diagnostics
+        if: failure()
+        run: |
+          kubectl -n "$NAMESPACE" get pods || true
+          kubectl -n "$NAMESPACE" get events --sort-by=.lastTimestamp | tail -n 40 || true

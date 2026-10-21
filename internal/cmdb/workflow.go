@@ -26,6 +26,14 @@ func (s *Service) SaveWorkflow(ctx context.Context, id string, definition Workfl
 	if err != nil {
 		return nil, err
 	}
+	if err := rejectCatalogWorkflow(clean.RequestType); err != nil {
+		return nil, err
+	}
+	if id != "" {
+		if err := s.rejectCatalogWorkflowID(ctx, id); err != nil {
+			return nil, err
+		}
+	}
 	if clean.Enabled {
 		// Only one workflow may start for a given form.
 		existing, err := s.store.ListWorkflows(ctx, false)
@@ -48,6 +56,8 @@ func (s *Service) GetWorkflow(ctx context.Context, id string) (*WorkflowDefiniti
 	return s.store.GetWorkflow(ctx, id)
 }
 
+// ListWorkflows lists every workflow, including the approval workflows
+// generated from catalog items; those are read-only in the Workflow Creator.
 func (s *Service) ListWorkflows(ctx context.Context, includeRetired bool) ([]WorkflowDefinition, error) {
 	return s.store.ListWorkflows(ctx, includeRetired)
 }
@@ -56,7 +66,32 @@ func (s *Service) RetireWorkflow(ctx context.Context, id string) (*WorkflowDefin
 	if err := validateID(id); err != nil {
 		return nil, err
 	}
+	if err := s.rejectCatalogWorkflowID(ctx, id); err != nil {
+		return nil, err
+	}
 	return s.store.RetireWorkflow(ctx, id)
+}
+
+func (s *Service) rejectCatalogWorkflowID(ctx context.Context, id string) error {
+	workflows, err := s.store.ListWorkflows(ctx, true)
+	if err != nil {
+		return err
+	}
+	for _, workflow := range workflows {
+		if workflow.ID == id {
+			return rejectCatalogWorkflow(workflow.RequestType)
+		}
+	}
+	return nil
+}
+
+// rejectCatalogWorkflow keeps the Workflow Creator away from catalog approval
+// workflows: they change only when the owning team republishes the item.
+func rejectCatalogWorkflow(requestType RequestType) error {
+	if requestType == CatalogRequest {
+		return fmt.Errorf("%w: catalog approval workflows are generated from the catalog item; the owning team changes them by publishing a new version", ErrInvalid)
+	}
+	return nil
 }
 
 // validateWorkflowDefinition normalizes a definition and checks it can run:
@@ -337,6 +372,10 @@ func (s *Service) ActOnTask(ctx context.Context, taskID string, input TaskAction
 		return nil, fmt.Errorf("%w: task %s is already %s", ErrInvalid, taskID, view.Status)
 	}
 	actor, eligible := findAssignee(view.EligibleActors, actorID)
+	if actorID == PlatformSuperAdminID {
+		// Full admin: the super admin may act on any task as an override.
+		actor, eligible = Assignee{ID: PlatformSuperAdminID, Kind: Identity, Name: PlatformSuperAdminName}, true
+	}
 	if !eligible {
 		return nil, fmt.Errorf("%w: %s is not assigned to this step; it is assigned to %s", ErrInvalid, actorID, describeAssignees(view.Assignees))
 	}
@@ -344,6 +383,9 @@ func (s *Service) ActOnTask(ctx context.Context, taskID string, input TaskAction
 	outcome := TaskOutcome{Comment: comment}
 	if view.Request.Properties["requestType"] == string(AccessRequest) {
 		return s.actOnAccessTask(ctx, view, actor, action, comment, input.Properties)
+	}
+	if view.Request.Properties["requestType"] == string(CatalogRequest) {
+		return s.actOnCatalogTask(ctx, view, actor, action, comment, input.Properties)
 	}
 	switch action {
 	case RejectTask:
@@ -409,7 +451,7 @@ func (s *Service) completeTaskAction(ctx context.Context, taskID, actorID string
 // approvalSatisfied reports whether this approval, added to those already
 // recorded, meets the step's rule.
 func approvalSatisfied(view *TaskView, actorID string) bool {
-	if view.Step.ApprovalRule != AllApprovers {
+	if view.Step.ApprovalRule != AllApprovers || actorID == PlatformSuperAdminID {
 		return true
 	}
 	approved := map[string]bool{actorID: true}

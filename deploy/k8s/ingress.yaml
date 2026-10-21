@@ -1,0 +1,31 @@
+# OPT-IN public entry point through the AKS application routing add-on
+# (az aks approuting enable -g <resource-group> -n <cluster>).
+#
+# WARNING: sign-in is still mocked by the X-Actor-Id header, so anyone who can
+# reach this host can act as any user, including platform-super-admin. Do not
+# apply this until Entra SSO is in place or access is otherwise restricted
+# (internal load balancer, IP allow-list, or an auth proxy in front).
+#
+#   kubectl apply -n servicemap -f deploy/k8s/ingress.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: servicemap
+  labels:
+    app.kubernetes.io/part-of: servicemap
+spec:
+  ingressClassName: webapprouting.kubernetes.azure.com
+  rules:
+    - host: servicemap.example.com # replace with your host
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: servicemap-web
+                port:
+                  name: http
+  # tls:
+  #   - hosts: [servicemap.example.com]
+  #     secretName: servicemap-tls

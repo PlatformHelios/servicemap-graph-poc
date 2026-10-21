@@ -2,7 +2,7 @@ import type { GraphNode, ItemDecision, RequestState, RequestType, TaskStatus } f
 
 // Shared between the catalog forms, the Workflow Creator, and Workflow Tasks.
 
-const requestStates: RequestState[] = ["draft", "submitted", "in-review", "fulfilled", "denied"];
+const requestStates: RequestState[] = ["draft", "submitted", "in-review", "fulfilled", "denied", "in-progress", "failed"];
 
 export function requestStateOf(record: GraphNode | undefined): RequestState {
   const state = record?.properties?.state;
@@ -10,11 +10,12 @@ export function requestStateOf(record: GraphNode | undefined): RequestState {
 }
 
 export function requestTypeOf(record: GraphNode | undefined): RequestType {
-  return record?.properties?.requestType === "access" ? "access" : "vendor";
+  const type = record?.properties?.requestType;
+  return type === "access" || type === "catalog" ? type : "vendor";
 }
 
 export function requestStatePillClass(state: RequestState) {
-  return state === "draft" ? "status-draft" : state === "fulfilled" ? "status-active" : state === "denied" ? "status-retired" : "status-in-review";
+  return state === "draft" ? "status-draft" : state === "fulfilled" ? "status-active" : state === "denied" || state === "failed" ? "status-retired" : "status-in-review";
 }
 
 export function taskStatusPillClass(status: TaskStatus) {
@@ -30,7 +31,7 @@ export function itemDecisionLabel(decision: ItemDecision | undefined) {
   return decision === "approved" ? "approved · awaiting fulfilment" : decision === "fulfilled" ? "provisioned" : decision ?? "pending";
 }
 
-export const formTitles: Record<RequestType, string> = { vendor: "Vendor Request Form", access: "Access Request Form" };
+export const formTitles: Record<RequestType, string> = { vendor: "Vendor Request Form", access: "Access Request Form", catalog: "Service Catalog" };
 
 // Labels for the request fields a workflow step may expose, keyed the same way
 // as the form itself (the keys come from Metadata.requestFields). The access
@@ -45,6 +46,7 @@ export const requestFieldLabels: Record<RequestType, Record<string, string>> = {
     contactEmail: "Contact Email Address",
   },
   access: {},
+  catalog: {},
 };
 
 export function requestFieldLabel(requestType: RequestType, key: string) {
