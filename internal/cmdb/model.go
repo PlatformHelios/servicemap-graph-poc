@@ -19,6 +19,7 @@ const (
 	Group       NodeKind = "group"
 	CI          NodeKind = "ci"
 	Incident    NodeKind = "incident"
+	Case        NodeKind = "case" // work ticket raised from a process-step CI
 	Change      NodeKind = "change"
 	Event       NodeKind = "event"
 	Request     NodeKind = "request" // catalog request that captures a CI before it exists
@@ -129,6 +130,8 @@ const (
 	ServiceCI     CIType = "service"
 	Process       CIType = "process"
 	Function      CIType = "function"
+	ProcessStepCI CIType = "process-step" // mapper step; distinct from relationship kind process-step
+	Automation    CIType = "automation"
 	Location      CIType = "location"
 	Contract      CIType = "contract"
 	Vendor        CIType = "vendor"
@@ -164,6 +167,33 @@ const (
 	HostedExternal HostingModel = "external"
 )
 
+// ExecutionModel records whether a process-step CI is done by a person or by a system.
+type ExecutionModel string
+
+const (
+	ManualExecution     ExecutionModel = "manual"
+	AutomatedExecution  ExecutionModel = "automated"
+)
+
+// AutomationEnvironment is the runtime stage an automation CI runs in.
+type AutomationEnvironment string
+
+const (
+	AutomationDevelopment AutomationEnvironment = "development"
+	AutomationTest        AutomationEnvironment = "test"
+	AutomationProduction  AutomationEnvironment = "production"
+)
+
+// AutomationTriggerType is how an automation CI is started.
+type AutomationTriggerType string
+
+const (
+	AutomationTriggerScheduled AutomationTriggerType = "scheduled"
+	AutomationTriggerEvent     AutomationTriggerType = "event"
+	AutomationTriggerManual    AutomationTriggerType = "manual"
+	AutomationTriggerAPI       AutomationTriggerType = "api"
+)
+
 // Criticality ranks how important a vendor CI is to the business.
 type Criticality string
 
@@ -196,6 +226,7 @@ var nodeSpecs = map[NodeKind]nodeSpec{
 	Group:       {label: "Group", key: "id"},
 	CI:          {label: "CI", key: "id"},
 	Incident:    {label: "Incident", key: "id"},
+	Case:        {label: "Case", key: "id"},
 	Change:      {label: "Change", key: "id"},
 	Event:       {label: "Event", key: "id"},
 	Request:     {label: "Request", key: "id"},
@@ -216,13 +247,21 @@ const (
 	Includes     RelationshipKind = "includes"
 	Affects      RelationshipKind = "affects"
 	Changes      RelationshipKind = "changes"
-	AssignedTo   RelationshipKind = "assigned-to" // incident to the identity or group working it
+	AssignedTo   RelationshipKind = "assigned-to" // incident or case to the identity or group working it
+	CaseFor      RelationshipKind = "case-for"    // case to the process-step CI that raised it
 	ObservedOn   RelationshipKind = "observed-on"
 	DependsOn    RelationshipKind = "depends-on"
 	Hosts        RelationshipKind = "hosts"
 	Uses         RelationshipKind = "uses"
 	Governs      RelationshipKind = "governs"
 	Provides     RelationshipKind = "provides"
+	// Business process maps: a Process CI links process-step to its first
+	// Process Step CI; later steps are chained with next-in-process. Distinct
+	// from catalog workflow has-step / next-step.
+	ProcessStep    RelationshipKind = "process-step"
+	NextInProcess  RelationshipKind = "next-in-process"
+	TriggeredBy    RelationshipKind = "triggered-by"
+	Produces       RelationshipKind = "produces"
 	Member       RelationshipKind = "member"
 	// Catalog requests are tied to their requester: drafted-request while the
 	// form is a draft, replaced by form-submitted when it is submitted.
@@ -271,6 +310,8 @@ const (
 	Responsible RelationshipKind = "responsible"
 	Consulted   RelationshipKind = "consulted"
 	Informed    RelationshipKind = "informed"
+	// DevelopedBy names the single identity who develops an automation CI.
+	DevelopedBy RelationshipKind = "developed-by"
 )
 
 // Every relationship is stored once, in its forward direction. The inverse
@@ -314,7 +355,8 @@ var relationshipSpecs = map[RelationshipKind]relationshipSpec{
 	Includes:     {typeName: "INCLUDES", inverse: "included-by", from: Role, to: Entitlement},
 	Affects:      {typeName: "AFFECTS", inverse: "affected-by", from: Incident, to: CI},
 	Changes:      {typeName: "CHANGES", inverse: "changed-by", from: Change, to: CI},
-	AssignedTo:   {typeName: "ASSIGNED_TO", inverse: "assignee-of", from: Incident, to: Identity, toKinds: []NodeKind{Identity, Group}},
+	AssignedTo:   {typeName: "ASSIGNED_TO", inverse: "assignee-of", from: Incident, fromKinds: []NodeKind{Incident, Case}, to: Identity, toKinds: []NodeKind{Identity, Group}},
+	CaseFor:      {typeName: "CASE_FOR", inverse: "has-case", from: Case, to: CI, toCITypes: []CIType{ProcessStepCI}},
 	ObservedOn:   {typeName: "OBSERVED_ON", inverse: "observed", from: Event, to: CI},
 	DependsOn:    {typeName: "DEPENDS_ON", inverse: "depended-on-by", from: CI, to: CI},
 	Hosts:        {typeName: "HOSTS", inverse: "hosted-by", from: CI, to: CI},
@@ -326,6 +368,11 @@ var relationshipSpecs = map[RelationshipKind]relationshipSpec{
 		{From: []CIType{ServiceCI, Function}, To: []CIType{ServiceCI, Function}},
 		{From: []CIType{Vendor}, To: []CIType{Application, Server, Printer}},
 	}},
+	ProcessStep: {typeName: "PROCESS_STEP", inverse: "step-in", from: CI, to: CI, fromCITypes: []CIType{Process}, toCITypes: []CIType{ProcessStepCI}},
+	NextInProcess: {typeName: "NEXT_IN_PROCESS", inverse: "previous-in-process", from: CI, to: CI, fromCITypes: []CIType{ProcessStepCI}, toCITypes: []CIType{ProcessStepCI}},
+	// A process may be kicked off by another CI, or by a person or group.
+	TriggeredBy: {typeName: "TRIGGERED_BY", inverse: "triggers", from: CI, to: CI, toKinds: []NodeKind{CI, Identity, Group}, fromCITypes: []CIType{Process}, toCITypes: []CIType{Application, Process, Function, ServiceCI}},
+	Produces: {typeName: "PRODUCES", inverse: "produced-by", from: CI, to: CI, fromCITypes: []CIType{Process, Function, ProcessStepCI}},
 	Member:       {typeName: "MEMBER", inverse: "member-of", from: Group, to: Identity},
 	DraftedRequest: {typeName: "DRAFTED_REQUEST", inverse: "drafted-request-for", from: Identity, to: Request},
 	FormSubmitted:  {typeName: "FORM_SUBMITTED", inverse: "submitted-by", from: Identity, to: Request},
@@ -354,6 +401,7 @@ var relationshipSpecs = map[RelationshipKind]relationshipSpec{
 	Responsible:  {typeName: "RESPONSIBLE", inverse: "responsible-for", from: CI, fromKinds: raciOwnedKinds, to: Identity, toKinds: []NodeKind{Identity, Group}},
 	Consulted:    {typeName: "CONSULTED", inverse: "consulted-on", from: CI, fromKinds: raciOwnedKinds, to: Identity, toKinds: []NodeKind{Identity, Group}},
 	Informed:     {typeName: "INFORMED", inverse: "informed-of", from: CI, fromKinds: raciOwnedKinds, to: Identity, toKinds: []NodeKind{Identity, Group}},
+	DevelopedBy:  {typeName: "DEVELOPED_BY", inverse: "developer-of", from: CI, to: Identity, fromCITypes: []CIType{Automation}},
 }
 
 // raciOwnedKinds are the record kinds that carry RACI ownership.
@@ -481,7 +529,7 @@ func RelationshipTypeNamesFor(kind NodeKind) []string {
 func ParseCIType(value string) (CIType, error) {
 	kind := CIType(strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), " ", "-")))
 	switch kind {
-	case Server, Printer, DataConnector, Application, ServiceCI, Process, Function, Location, Contract, Vendor:
+	case Server, Printer, DataConnector, Application, ServiceCI, Process, Function, ProcessStepCI, Automation, Location, Contract, Vendor:
 		return kind, nil
 	default:
 		return "", fmt.Errorf("%w: unsupported CI type %q; allowed types are %s", ErrInvalid, value, strings.Join(CITypeNames(), ", "))
@@ -530,6 +578,137 @@ func ContractTypeNames() []string {
 // RequiresHosting reports whether a CI type carries the hosted (internal/external) property.
 func RequiresHosting(ciType CIType) bool {
 	return ciType == Application
+}
+
+// RequiresExecution reports whether a CI type carries manual/automated execution.
+func RequiresExecution(ciType CIType) bool {
+	return ciType == ProcessStepCI
+}
+
+// RequiresAutomationFields reports whether a CI type carries environment and triggerType.
+func RequiresAutomationFields(ciType CIType) bool {
+	return ciType == Automation
+}
+
+func ParseAutomationEnvironment(value string) (AutomationEnvironment, error) {
+	environment := AutomationEnvironment(strings.ToLower(strings.TrimSpace(value)))
+	switch environment {
+	case AutomationDevelopment, AutomationTest, AutomationProduction:
+		return environment, nil
+	default:
+		return "", fmt.Errorf("%w: unsupported environment %q; allowed values are %s", ErrInvalid, value, strings.Join(AutomationEnvironmentNames(), ", "))
+	}
+}
+
+func AutomationEnvironmentNames() []string {
+	return []string{string(AutomationDevelopment), string(AutomationTest), string(AutomationProduction)}
+}
+
+func ParseAutomationTriggerType(value string) (AutomationTriggerType, error) {
+	triggerType := AutomationTriggerType(strings.ToLower(strings.TrimSpace(value)))
+	switch triggerType {
+	case AutomationTriggerScheduled, AutomationTriggerEvent, AutomationTriggerManual, AutomationTriggerAPI:
+		return triggerType, nil
+	default:
+		return "", fmt.Errorf("%w: unsupported triggerType %q; allowed values are %s", ErrInvalid, value, strings.Join(AutomationTriggerTypeNames(), ", "))
+	}
+}
+
+func AutomationTriggerTypeNames() []string {
+	return []string{string(AutomationTriggerScheduled), string(AutomationTriggerEvent), string(AutomationTriggerManual), string(AutomationTriggerAPI)}
+}
+
+func ParseExecutionModel(value string) (ExecutionModel, error) {
+	execution := ExecutionModel(strings.ToLower(strings.TrimSpace(value)))
+	switch execution {
+	case ManualExecution, AutomatedExecution:
+		return execution, nil
+	default:
+		return "", fmt.Errorf("%w: unsupported execution %q; allowed values are %s", ErrInvalid, value, strings.Join(ExecutionModelNames(), ", "))
+	}
+}
+
+func ExecutionModelNames() []string {
+	return []string{string(ManualExecution), string(AutomatedExecution)}
+}
+
+// TriggerAction is a kind of event that can start a business process (not a CI).
+type TriggerAction string
+
+const (
+	TriggerEmailReceived      TriggerAction = "email-received"
+	TriggerFileDelivered      TriggerAction = "file-delivered"
+	TriggerWorkItemQueued     TriggerAction = "work-item-queued"
+	TriggerFormSubmitted      TriggerAction = "form-submitted"
+	TriggerManualStart        TriggerAction = "manual-start"
+	TriggerSchedule           TriggerAction = "schedule"
+	TriggerAlertRaised        TriggerAction = "alert-raised"
+	TriggerApprovalGranted    TriggerAction = "approval-granted"
+	TriggerUpstreamCompleted  TriggerAction = "upstream-completed"
+	TriggerStatusChanged      TriggerAction = "status-changed"
+	TriggerCustomerContact    TriggerAction = "customer-contact"
+	TriggerPaymentReceived    TriggerAction = "payment-received"
+)
+
+func ParseTriggerAction(value string) (TriggerAction, error) {
+	action := TriggerAction(strings.ToLower(strings.TrimSpace(value)))
+	switch action {
+	case TriggerEmailReceived, TriggerFileDelivered, TriggerWorkItemQueued, TriggerFormSubmitted, TriggerManualStart, TriggerSchedule, TriggerAlertRaised, TriggerApprovalGranted, TriggerUpstreamCompleted, TriggerStatusChanged, TriggerCustomerContact, TriggerPaymentReceived:
+		return action, nil
+	default:
+		return "", fmt.Errorf("%w: unsupported trigger action %q; allowed values are %s", ErrInvalid, value, strings.Join(TriggerActionNames(), ", "))
+	}
+}
+
+func TriggerActionNames() []string {
+	return []string{
+		string(TriggerEmailReceived), string(TriggerFileDelivered), string(TriggerWorkItemQueued), string(TriggerFormSubmitted),
+		string(TriggerManualStart), string(TriggerSchedule), string(TriggerAlertRaised), string(TriggerApprovalGranted),
+		string(TriggerUpstreamCompleted), string(TriggerStatusChanged), string(TriggerCustomerContact), string(TriggerPaymentReceived),
+	}
+}
+
+// OutputAction is a kind of outcome a business process can produce (not a CI).
+type OutputAction string
+
+const (
+	OutputRecordCreated     OutputAction = "record-created"
+	OutputRecordUpdated     OutputAction = "record-updated"
+	OutputFileProduced      OutputAction = "file-produced"
+	OutputNotificationSent  OutputAction = "notification-sent"
+	OutputWorkItemCreated   OutputAction = "work-item-created"
+	OutputDecisionRecorded  OutputAction = "decision-recorded"
+	OutputAccessGranted     OutputAction = "access-granted"
+	OutputChangeApplied     OutputAction = "change-applied"
+	OutputProcessStarted    OutputAction = "process-started"
+	OutputQueueCleared      OutputAction = "queue-cleared"
+	OutputArtifactPublished OutputAction = "artifact-published"
+	OutputPaymentIssued     OutputAction = "payment-issued"
+)
+
+func ParseOutputAction(value string) (OutputAction, error) {
+	action := OutputAction(strings.ToLower(strings.TrimSpace(value)))
+	switch action {
+	case OutputRecordCreated, OutputRecordUpdated, OutputFileProduced, OutputNotificationSent, OutputWorkItemCreated, OutputDecisionRecorded, OutputAccessGranted, OutputChangeApplied, OutputProcessStarted, OutputQueueCleared, OutputArtifactPublished, OutputPaymentIssued:
+		return action, nil
+	default:
+		return "", fmt.Errorf("%w: unsupported output action %q; allowed values are %s", ErrInvalid, value, strings.Join(OutputActionNames(), ", "))
+	}
+}
+
+func OutputActionNames() []string {
+	return []string{
+		string(OutputRecordCreated), string(OutputRecordUpdated), string(OutputFileProduced), string(OutputNotificationSent),
+		string(OutputWorkItemCreated), string(OutputDecisionRecorded), string(OutputAccessGranted), string(OutputChangeApplied),
+		string(OutputProcessStarted), string(OutputQueueCleared), string(OutputArtifactPublished), string(OutputPaymentIssued),
+	}
+}
+
+// AllowsRACIOwnership is false for CI types whose ownership rolls up elsewhere
+// (process-step CIs are owned via their parent Process). Responsible may still
+// be used on process-step CIs for "performed by" in the Process Mapper.
+func AllowsRACIOwnership(ciType CIType) bool {
+	return ciType != ProcessStepCI
 }
 
 func ParseHostingModel(value string) (HostingModel, error) {
@@ -978,6 +1157,8 @@ func GeneratedIDPrefix(kind NodeKind) (string, error) {
 		return "CI", nil
 	case Incident:
 		return "INC", nil
+	case Case:
+		return "CAS", nil
 	case Change:
 		return "CHG", nil
 	case Event:
@@ -1000,7 +1181,7 @@ func GeneratedIDPrefix(kind NodeKind) (string, error) {
 }
 
 func CITypeNames() []string {
-	return []string{string(Server), string(Printer), string(DataConnector), string(Application), string(ServiceCI), string(Process), string(Function), string(Location), string(Contract), string(Vendor)}
+	return []string{string(Server), string(Printer), string(DataConnector), string(Application), string(ServiceCI), string(Process), string(Function), string(ProcessStepCI), string(Automation), string(Location), string(Contract), string(Vendor)}
 }
 
 func CICategoryNames() []string {
@@ -1008,7 +1189,7 @@ func CICategoryNames() []string {
 }
 
 func NodeKinds() []NodeKind {
-	return []NodeKind{Identity, JobCode, Birthright, Role, Entitlement, Group, CI, Incident, Change, Event, Request, Workflow, WorkflowStep, WorkflowRun, Task, CatalogItem}
+	return []NodeKind{Identity, JobCode, Birthright, Role, Entitlement, Group, CI, Incident, Case, Change, Event, Request, Workflow, WorkflowStep, WorkflowRun, Task, CatalogItem}
 }
 
 // WorkflowNodeKinds are the kinds managed through the workflow API rather than
@@ -1018,7 +1199,7 @@ func WorkflowNodeKinds() []NodeKind {
 }
 
 func RelationshipKinds() []RelationshipKind {
-	return []RelationshipKind{HasJobCode, WorkLocation, Member, DraftedRequest, FormSubmitted, RequestedFor, RequestsAccess, HasStep, NextStep, StepAssignedTo, RunFor, InstanceOf, TaskFor, TaskStep, TaskItem, TaskAssignedTo, ActedBy, FulfilledBy, ForCatalogItem, CatalogOwnedBy, VisibleTo, ApprovedThrough, References, QualifiesFor, Grants, Includes, HasRole, EntitledBy, Permissions, Affects, Changes, AssignedTo, ObservedOn, DependsOn, Hosts, Uses, Governs, Provides, Accountable, Responsible, Consulted, Informed}
+	return []RelationshipKind{HasJobCode, WorkLocation, Member, DraftedRequest, FormSubmitted, RequestedFor, RequestsAccess, HasStep, NextStep, StepAssignedTo, RunFor, InstanceOf, TaskFor, TaskStep, TaskItem, TaskAssignedTo, ActedBy, FulfilledBy, ForCatalogItem, CatalogOwnedBy, VisibleTo, ApprovedThrough, References, QualifiesFor, Grants, Includes, HasRole, EntitledBy, Permissions, Affects, Changes, AssignedTo, CaseFor, ObservedOn, DependsOn, Hosts, Uses, Governs, Provides, ProcessStep, NextInProcess, TriggeredBy, Produces, Accountable, Responsible, Consulted, Informed, DevelopedBy}
 }
 
 // RelationshipTypeNames returns the Neo4j relationship types in RelationshipKinds order.
@@ -1122,6 +1303,8 @@ func LinkedCIRelationship(kind NodeKind) (RelationshipKind, CIType, bool) {
 		return WorkLocation, Location, true
 	case Incident:
 		return Affects, "", true
+	case Case:
+		return CaseFor, ProcessStepCI, true
 	case Change:
 		return Changes, "", true
 	case Event:

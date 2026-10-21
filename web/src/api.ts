@@ -19,6 +19,7 @@ import type {
   TaskView,
   WorkflowDefinition,
   Holiday,
+  ProcessMap,
 } from "./types";
 import { storedActingAs, superAdmin } from "./session";
 
@@ -241,6 +242,17 @@ export function saveWorkflow(workflow: WorkflowDefinition): Promise<WorkflowDefi
 
 export function retireWorkflow(id: string): Promise<WorkflowDefinition> {
   return request<WorkflowDefinition>(`/api/workflows/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export function getProcessMap(processId: string): Promise<ProcessMap> {
+  return request<ProcessMap>(`/api/process-maps/${encodeURIComponent(processId)}`);
+}
+
+export function saveProcessMap(processId: string, processMap: ProcessMap): Promise<ProcessMap> {
+  return request<ProcessMap>(`/api/process-maps/${encodeURIComponent(processId)}`, {
+    method: "PUT",
+    body: JSON.stringify(processMap),
+  });
 }
 
 export interface TaskQuery {

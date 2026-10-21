@@ -7,6 +7,7 @@ export type NodeKind =
   | "group"
   | "ci"
   | "incident"
+  | "case"
   | "change"
   | "event"
   | "request"
@@ -27,12 +28,15 @@ export type NodeKind =
 export type RequestType = "vendor" | "access" | "catalog";
 export type RequestState = "draft" | "submitted" | "in-review" | "fulfilled" | "denied" | "in-progress" | "failed";
 
-export type CIType = "server" | "printer" | "data-connector" | "application" | "service" | "process" | "function" | "location" | "contract" | "vendor";
+export type CIType = "server" | "printer" | "data-connector" | "application" | "service" | "process" | "function" | "process-step" | "automation" | "location" | "contract" | "vendor";
 
 export type CICategory = "business" | "technology" | "security";
 
 export type ContractType = "basic-contract" | "msa" | "nda";
 export type HostingModel = "internal" | "external";
+export type ExecutionModel = "manual" | "automated";
+export type AutomationEnvironment = "development" | "test" | "production";
+export type AutomationTriggerType = "scheduled" | "event" | "manual" | "api";
 export type Criticality = "critical" | "important" | "business-support";
 
 // Forward relationship kinds. Each is stored once; the inverse label (how the
@@ -70,16 +74,83 @@ export type RelationshipKind =
   | "affects"
   | "changes"
   | "assigned-to"
+  | "case-for"
   | "observed-on"
   | "depends-on"
   | "hosts"
   | "uses"
   | "governs"
   | "provides"
+  | "process-step"
+  | "next-in-process"
+  | "triggered-by"
+  | "produces"
   | "accountable"
   | "responsible"
   | "consulted"
-  | "informed";
+  | "informed"
+  | "developed-by";
+
+export type ProcessMapPerformerKind = "identity" | "group" | "application" | "automation";
+
+export type TriggerAction =
+  | "email-received"
+  | "file-delivered"
+  | "work-item-queued"
+  | "form-submitted"
+  | "manual-start"
+  | "schedule"
+  | "alert-raised"
+  | "approval-granted"
+  | "upstream-completed"
+  | "status-changed"
+  | "customer-contact"
+  | "payment-received";
+
+export type OutputAction =
+  | "record-created"
+  | "record-updated"
+  | "file-produced"
+  | "notification-sent"
+  | "work-item-created"
+  | "decision-recorded"
+  | "access-granted"
+  | "change-applied"
+  | "process-started"
+  | "queue-cleared"
+  | "artifact-published"
+  | "payment-issued";
+
+export interface ProcessMapPerformer {
+  kind: ProcessMapPerformerKind;
+  id: string;
+  name?: string;
+}
+
+export interface ProcessMapStep {
+  id?: string;
+  name: string;
+  description?: string;
+  execution: ExecutionModel;
+  createsCase?: boolean;
+  olaEnabled?: boolean;
+  olaBusinessDays?: number;
+  order: number;
+  x?: number;
+  y?: number;
+  performers?: ProcessMapPerformer[];
+}
+
+export interface ProcessMap {
+  processId: string;
+  name?: string;
+  description?: string;
+  triggerActions?: TriggerAction[];
+  triggerDescription?: string;
+  outputActions?: OutputAction[];
+  outputDescription?: string;
+  steps: ProcessMapStep[];
+}
 
 // Workflow definitions (built in the Workflow Creator) and the tasks their
 // runs raise. Steps run in order; each exposes a slice of the request form to
@@ -329,6 +400,11 @@ export interface Metadata {
   ciCategories?: CICategory[];
   contractTypes?: ContractType[];
   hostingModels?: HostingModel[];
+  executionModels?: ExecutionModel[];
+  automationEnvironments?: AutomationEnvironment[];
+  automationTriggerTypes?: AutomationTriggerType[];
+  triggerActions?: TriggerAction[];
+  outputActions?: OutputAction[];
   criticalities?: Criticality[];
   requestTypes?: RequestType[];
   requestStates?: RequestState[];
@@ -343,7 +419,7 @@ export interface Metadata {
   relationships: RelationshipDefinition[];
 }
 
-export type Resource = NodeKind | "home" | "relationships" | "map" | "location-map" | "workflow-creator" | "workflow-tasks" | "access-request" | "catalog" | "workflow-analyzer";
+export type Resource = NodeKind | "home" | "relationships" | "map" | "location-map" | "process-mapper" | "workflow-creator" | "workflow-tasks" | "access-request" | "catalog" | "workflow-analyzer";
 
 // A form field of a catalog item: one property of its input JSON Schema.
 export interface CatalogField {

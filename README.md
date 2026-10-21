@@ -218,6 +218,7 @@ POST                /api/access-requests
 GET                 /api/access-anomalies
 POST                /api/access-anomalies/refresh
 GET                 /api/capabilities
+GET, PUT            /api/process-maps/{processId}
 GET                 /api/meta
 GET                 /api/openapi.yaml
 GET                 /api/docs
@@ -346,6 +347,8 @@ A `ci` record must have a `ciType` from a fixed, code-reviewed enum. Adding a ty
 | `server`, `printer`, `data-connector` | `name`, `description` |
 | `application` | `name`, `description`, `hosted` (required: `internal` or `external`) |
 | `service`, `process`, `function` | `name`, `description`, `category` (required at creation: `business`, `technology`, or `security`) |
+| `process-step` | `name`, `description`, `execution` (required: `manual` or `automated`). No category and no RACI; ownership stays on the parent Process |
+| `automation` | `name`, `description`, `environment` (required: `development`, `test`, or `production`), `triggerType` (required: `scheduled`, `event`, `manual`, or `api`), `critical`, and one `developed-by` identity |
 | `location` | `name`, `siteId`, `addressLine1`, `addressLine2`, `city`, `state`, `postalCode`, `country`, `timezone` (IANA), `hoursMonday` ... `hoursSunday` |
 | `contract` | `name`, `description`, `contractType` (required: `basic-contract`, `msa`, or `nda`) |
 | `vendor` | `name`, `description`, `criticality` (required: `critical`, `important`, or `business-support`), `contactName`, `contactPhone`, `contactEmail` |
@@ -390,23 +393,39 @@ Every relationship is stored once, in its forward direction, and has a paired in
 | `acted-by` | `acted-on` | Task -> Identity (with `action`, `comment`, `actedAt`) |
 | `affects` | `affected-by` | Incident -> CI |
 | `changes` | `changed-by` | Change -> CI |
-| `assigned-to` | `assignee-of` | Incident -> Identity or Group |
+| `assigned-to` | `assignee-of` | Incident or Case -> Identity or Group |
+| `case-for` | `has-case` | Case -> Process Step CI |
 | `observed-on` | `observed` | Event -> CI |
 | `depends-on` | `depended-on-by` | CI (dependent) -> CI (dependency) |
 | `hosts` | `hosted-by` | CI (host) -> CI (hosted workload) |
 | `uses` | `used-by` | CI (consumer) -> CI (provider) |
 | `governs` | `governed-by` | Contract CI -> CI (only contracts can start `governs`) |
 | `provides` | `provided-by` | Service/Function CI -> Service/Function CI, or Vendor CI -> Application/Server/Printer CI |
+| `process-step` | `step-in` | Process CI -> first Process Step CI only |
+| `next-in-process` | `previous-in-process` | Process Step CI -> Process Step CI |
+| `triggered-by` | `triggers` | Process CI -> Application, Process, Function, or Service CI, or Identity or Group |
+| `produces` | `produced-by` | Process, Function, or Process Step CI -> CI |
 | `accountable` | `accountable-for` | CI, Job code, Birthright, Role, or Entitlement -> Identity |
 | `responsible` | `responsible-for` | CI, Job code, Birthright, Role, or Entitlement -> Identity or Group |
 | `consulted` | `consulted-on` | CI, Job code, Birthright, Role, or Entitlement -> Identity or Group |
 | `informed` | `informed-of` | CI, Job code, Birthright, Role, or Entitlement -> Identity or Group |
+| `developed-by` | `developer-of` | Automation CI -> Identity (one developer) |
 
 **RACI.** CIs, job codes, birthrights, roles, and entitlements (`raciKinds` in `GET /api/meta`) carry ownership through the last four relationships. Their dashboard forms have a **Details** tab and a **RACI** tab: Accountable is a single identity, while Responsible, Consulted, and Informed accept any mix of identities and groups. Saving the form creates or retires the matching relationships.
 
 **CI type rules.** `provides` connects services and functions in any combination, and a vendor provides the applications, servers, and printers it supplies. These pairings are enforced per rule (a service cannot provide a server, and a vendor cannot provide a service); `GET /api/meta` publishes them as `ciTypeRules`, and the dashboard narrows the To list to match the chosen From record. `work-location` must end on a `location` CI; creating an identity with `ciIds` pointing at a location creates the link in the same request.
 
 **Migrations.** The former `hosted-on` and `used-by` types were replaced by `hosts` and the inverse of `uses`, and the former `business-process` CI type was renamed `process`. `init` rewrites existing edges and records to the new forms.
+
+### Business Process Mapper
+
+**CMDB → Process Mapper** documents how a Process CI runs. Pick an existing process or type a new name, then **Save map** (or **Create & save map**) writes the Process CI if needed plus triggers, ordered Process Step CIs, performers, and outcomes. Steps and performers are graph relationships, so Graph Map shows the same structure.
+
+- Steps are Process Step CIs (`execution` `manual` or `automated`). The Process links `process-step` only to the first step; later steps use `next-in-process`. Canvas `x`/`y` live on each step CI.
+- Start and outputs are action catalogs on the Process CI (`triggerActions` / `outputActions`, plus optional descriptions). `GET /api/meta` publishes the allowed values.
+- Manual steps are performed by people, groups, or applications. Automated steps are performed only by Automation CIs and cannot allow case creation.
+- **Allow case creation** lets a case be raised for that step. The case copies the step OLA and is assigned to the step's identity and group performers.
+- `GET` / `PUT /api/process-maps/{processId}` load and save the map. Open it from CMDB, a Process CI, or Graph Map.
 
 ## Catalog requests and workflows
 

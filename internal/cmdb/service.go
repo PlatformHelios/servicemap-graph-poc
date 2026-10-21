@@ -134,19 +134,34 @@ func (s *Service) CreateGeneratedNode(ctx context.Context, kind NodeKind, proper
 		return nil, err
 	}
 	if _, _, linkable := LinkedCIRelationship(kind); len(cleanCIIDs) > 0 && !linkable {
-		return nil, fmt.Errorf("%w: ciIds are only valid when creating identity, incident, change, or event records", ErrInvalid)
+		return nil, fmt.Errorf("%w: ciIds are only valid when creating identity, incident, case, change, or event records", ErrInvalid)
 	}
 	if RequiresLinkedCIs(kind) && len(cleanCIIDs) == 0 {
 		return nil, fmt.Errorf("%w: %s records must be linked to at least one CI", ErrInvalid, kind)
 	}
+	if kind == Case {
+		if err := s.prepareCaseFromStep(ctx, cleanProperties, cleanCIIDs); err != nil {
+			return nil, err
+		}
+	}
 	if kind == CI && cleanProperties["ciType"] == string(Location) {
 		s.geocodeLocation(ctx, cleanProperties, nil)
 	}
-	return s.store.CreateGeneratedNode(ctx, kind, cleanProperties, cleanCIIDs)
+	created, err := s.store.CreateGeneratedNode(ctx, kind, cleanProperties, cleanCIIDs)
+	if err != nil {
+		return nil, err
+	}
+	if kind == Case {
+		if err := s.assignCaseFromStep(ctx, created.ID, cleanCIIDs[0]); err != nil {
+			return nil, err
+		}
+		return s.GetNode(ctx, Case, created.ID, false)
+	}
+	return created, nil
 }
 
 func RequiresLinkedCIs(kind NodeKind) bool {
-	return kind == Incident || kind == Change
+	return kind == Incident || kind == Change || kind == Case
 }
 
 func normalizeCIIDs(ciIDs []string) ([]string, error) {
@@ -217,13 +232,23 @@ func (s *Service) UpdateNode(ctx context.Context, kind NodeKind, id string, prop
 	if len(cleanProperties) == 0 {
 		return nil, fmt.Errorf("%w: at least one property is required for update", ErrInvalid)
 	}
-	if kind == CI && (hasAddressChange(cleanProperties) || hasCoordinates(cleanProperties)) {
+	_, patchingActions := cleanProperties["triggerActions"]
+	if !patchingActions {
+		_, patchingActions = cleanProperties["outputActions"]
+	}
+	needsExisting := kind == CI && (hasAddressChange(cleanProperties) || hasCoordinates(cleanProperties) || (patchingActions && cleanProperties["ciType"] == nil))
+	if needsExisting {
 		existing, err := s.store.GetNode(ctx, kind, id, false)
 		if err != nil {
 			return nil, err
 		}
-		if existing.Properties["ciType"] == string(Location) {
-			s.geocodeLocation(ctx, cleanProperties, existing.Properties)
+		if patchingActions && propertyString(existing.Properties, "ciType") != string(Process) {
+			return nil, fmt.Errorf("%w: triggerActions and outputActions are only valid on process CIs", ErrInvalid)
+		}
+		if hasAddressChange(cleanProperties) || hasCoordinates(cleanProperties) {
+			if existing.Properties["ciType"] == string(Location) {
+				s.geocodeLocation(ctx, cleanProperties, existing.Properties)
+			}
 		}
 	}
 	if kind == Request {
@@ -546,9 +571,17 @@ func validateCIProperties(kind NodeKind, properties map[string]any, requireCITyp
 	categoryValue, hasCategory := properties["category"]
 	contractTypeValue, hasContractType := properties["contractType"]
 	hostedValue, hasHosted := properties["hosted"]
+	executionValue, hasExecution := properties["execution"]
+	environmentValue, hasEnvironment := properties["environment"]
+	triggerTypeValue, hasTriggerType := properties["triggerType"]
+	_, hasTriggerActions := properties["triggerActions"]
+	_, hasOutputActions := properties["outputActions"]
 	criticalityValue, hasCriticality := properties["criticality"]
 	_, hasCritical := properties["critical"]
 	_, hasNodeDown := properties["nodeDown"]
+	_, hasCreatesCase := properties["createsCase"]
+	_, hasOLAEnabled := properties["olaEnabled"]
+	_, hasOLADays := properties["olaBusinessDays"]
 	if kind == Request {
 		return validateRequestProperties(properties, requireCIType)
 	}
@@ -558,6 +591,18 @@ func validateCIProperties(kind NodeKind, properties map[string]any, requireCITyp
 		}
 	} else if hasNodeDown {
 		return fmt.Errorf("%w: nodeDown is only valid for incident records", ErrInvalid)
+	}
+	if kind == Case {
+		if hasCreatesCase {
+			return fmt.Errorf("%w: createsCase is only valid on process-step CIs", ErrInvalid)
+		}
+		if hasCIType {
+			return fmt.Errorf("%w: ciType is only valid for CI records", ErrInvalid)
+		}
+		if hasOLAEnabled || hasOLADays {
+			return normalizeOLAProperties(properties, requireCIType)
+		}
+		return nil
 	}
 	if kind != CI {
 		if hasCIType {
@@ -572,11 +617,23 @@ func validateCIProperties(kind NodeKind, properties map[string]any, requireCITyp
 		if hasHosted {
 			return fmt.Errorf("%w: hosted is only valid for CI records", ErrInvalid)
 		}
+		if hasExecution {
+			return fmt.Errorf("%w: execution is only valid for CI records", ErrInvalid)
+		}
+		if hasEnvironment || hasTriggerType {
+			return fmt.Errorf("%w: environment and triggerType are only valid for CI records", ErrInvalid)
+		}
+		if hasTriggerActions || hasOutputActions {
+			return fmt.Errorf("%w: triggerActions and outputActions are only valid for CI records", ErrInvalid)
+		}
 		if hasCriticality {
 			return fmt.Errorf("%w: criticality is only valid for CI records", ErrInvalid)
 		}
 		if hasCritical {
 			return fmt.Errorf("%w: critical is only valid for CI records", ErrInvalid)
+		}
+		if hasCreatesCase || hasOLAEnabled || hasOLADays {
+			return fmt.Errorf("%w: createsCase and OLA fields are only valid on process-step CIs or cases", ErrInvalid)
 		}
 		return nil
 	}
@@ -604,6 +661,39 @@ func validateCIProperties(kind NodeKind, properties map[string]any, requireCITyp
 			return err
 		}
 		properties["hosted"] = string(hosting)
+	}
+	if hasExecution {
+		executionName, ok := executionValue.(string)
+		if !ok {
+			return fmt.Errorf("%w: execution must be a string", ErrInvalid)
+		}
+		execution, err := ParseExecutionModel(executionName)
+		if err != nil {
+			return err
+		}
+		properties["execution"] = string(execution)
+	}
+	if hasEnvironment {
+		environmentName, ok := environmentValue.(string)
+		if !ok {
+			return fmt.Errorf("%w: environment must be a string", ErrInvalid)
+		}
+		environment, err := ParseAutomationEnvironment(environmentName)
+		if err != nil {
+			return err
+		}
+		properties["environment"] = string(environment)
+	}
+	if hasTriggerType {
+		triggerTypeName, ok := triggerTypeValue.(string)
+		if !ok {
+			return fmt.Errorf("%w: triggerType must be a string", ErrInvalid)
+		}
+		triggerType, err := ParseAutomationTriggerType(triggerTypeName)
+		if err != nil {
+			return err
+		}
+		properties["triggerType"] = string(triggerType)
 	}
 	if hasContractType {
 		contractTypeName, ok := contractTypeValue.(string)
@@ -633,6 +723,28 @@ func validateCIProperties(kind NodeKind, properties map[string]any, requireCITyp
 		}
 		properties["category"] = string(category)
 	}
+	if hasTriggerActions {
+		actions, err := normalizeActionList(properties["triggerActions"], ParseTriggerAction)
+		if err != nil {
+			return fmt.Errorf("triggerActions: %w", err)
+		}
+		properties["triggerActions"] = actions
+	}
+	if hasOutputActions {
+		actions, err := normalizeActionList(properties["outputActions"], ParseOutputAction)
+		if err != nil {
+			return fmt.Errorf("outputActions: %w", err)
+		}
+		properties["outputActions"] = actions
+	}
+	if hasCreatesCase || hasOLAEnabled || hasOLADays {
+		if err := normalizeBoolProperty(properties, "createsCase", false); err != nil {
+			return err
+		}
+		if err := normalizeOLAProperties(properties, false); err != nil {
+			return err
+		}
+	}
 	if !hasCIType {
 		if requireCIType {
 			return fmt.Errorf("%w: CI records require a ciType", ErrInvalid)
@@ -657,10 +769,104 @@ func validateCIProperties(kind NodeKind, properties map[string]any, requireCITyp
 	if requireCIType && RequiresHosting(ciType) && !hasHosted {
 		return fmt.Errorf("%w: %s CI records require a hosted value (%s)", ErrInvalid, ciType, strings.Join(HostingModelNames(), ", "))
 	}
+	if requireCIType && RequiresExecution(ciType) && !hasExecution {
+		return fmt.Errorf("%w: %s CI records require an execution value (%s)", ErrInvalid, ciType, strings.Join(ExecutionModelNames(), ", "))
+	}
+	if requireCIType && RequiresAutomationFields(ciType) && !hasEnvironment {
+		return fmt.Errorf("%w: %s CI records require an environment (%s)", ErrInvalid, ciType, strings.Join(AutomationEnvironmentNames(), ", "))
+	}
+	if requireCIType && RequiresAutomationFields(ciType) && !hasTriggerType {
+		return fmt.Errorf("%w: %s CI records require a triggerType (%s)", ErrInvalid, ciType, strings.Join(AutomationTriggerTypeNames(), ", "))
+	}
 	if requireCIType && RequiresCriticality(ciType) && !hasCriticality {
 		return fmt.Errorf("%w: %s CI records require a criticality (%s)", ErrInvalid, ciType, strings.Join(CriticalityNames(), ", "))
 	}
+	if ciType != Process && (hasTriggerActions || hasOutputActions) {
+		return fmt.Errorf("%w: triggerActions and outputActions are only valid on process CIs", ErrInvalid)
+	}
+	if ciType != ProcessStepCI && (hasCreatesCase || hasOLAEnabled || hasOLADays) {
+		return fmt.Errorf("%w: createsCase and OLA fields are only valid on process-step CIs", ErrInvalid)
+	}
+	if ciType != Automation && (hasEnvironment || hasTriggerType) {
+		return fmt.Errorf("%w: environment and triggerType are only valid on automation CIs", ErrInvalid)
+	}
+	if ciType == ProcessStepCI {
+		if err := normalizeBoolProperty(properties, "createsCase", requireCIType); err != nil {
+			return err
+		}
+		if err := normalizeOLAProperties(properties, requireCIType); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func normalizeOLAProperties(properties map[string]any, required bool) error {
+	if err := normalizeBoolProperty(properties, "olaEnabled", required); err != nil {
+		return err
+	}
+	enabled, _ := properties["olaEnabled"].(bool)
+	value, present := properties["olaBusinessDays"]
+	if !present {
+		if enabled && required {
+			return fmt.Errorf("%w: olaBusinessDays is required when olaEnabled is true", ErrInvalid)
+		}
+		return nil
+	}
+	days := 0
+	switch typed := value.(type) {
+	case int:
+		days = typed
+	case int64:
+		days = int(typed)
+	case float64:
+		days = int(typed)
+	default:
+		return fmt.Errorf("%w: olaBusinessDays must be a number", ErrInvalid)
+	}
+	if enabled && (days < 1 || days > 365) {
+		return fmt.Errorf("%w: olaBusinessDays must be between 1 and 365", ErrInvalid)
+	}
+	if !enabled {
+		properties["olaBusinessDays"] = 0
+		return nil
+	}
+	properties["olaBusinessDays"] = days
+	return nil
+}
+
+func normalizeActionList[T ~string](value any, parse func(string) (T, error)) ([]string, error) {
+	var raw []string
+	switch typed := value.(type) {
+	case []string:
+		raw = typed
+	case []any:
+		raw = make([]string, 0, len(typed))
+		for _, item := range typed {
+			text, ok := item.(string)
+			if !ok {
+				return nil, fmt.Errorf("%w: must be a list of strings", ErrInvalid)
+			}
+			raw = append(raw, text)
+		}
+	default:
+		return nil, fmt.Errorf("%w: must be a list of strings", ErrInvalid)
+	}
+	seen := map[string]bool{}
+	clean := make([]string, 0, len(raw))
+	for _, item := range raw {
+		parsed, err := parse(item)
+		if err != nil {
+			return nil, err
+		}
+		name := string(parsed)
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		clean = append(clean, name)
+	}
+	return clean, nil
 }
 
 func (s *Service) RetireNode(ctx context.Context, kind NodeKind, id string) (*Node, error) {
@@ -722,11 +928,56 @@ func (s *Service) CreateRelationship(ctx context.Context, kind RelationshipKind,
 	if err := validateID(toID); err != nil {
 		return nil, fmt.Errorf("to id: %w", err)
 	}
+	if err := s.rejectProcessStepOwnershipRACI(ctx, kind, fromID); err != nil {
+		return nil, err
+	}
+	if err := s.replaceSingletonDevelopedBy(ctx, kind, fromID, toID); err != nil {
+		return nil, err
+	}
 	cleanProperties, err := validateProperties(properties)
 	if err != nil {
 		return nil, err
 	}
 	return s.store.CreateRelationship(ctx, kind, fromID, toID, cleanProperties)
+}
+
+// An automation CI has at most one developer: creating developed-by retires any
+// other active developed-by from the same automation.
+func (s *Service) replaceSingletonDevelopedBy(ctx context.Context, kind RelationshipKind, fromID, toID string) error {
+	if kind != DevelopedBy {
+		return nil
+	}
+	node, err := s.store.GetNode(ctx, CI, fromID, false)
+	if err != nil {
+		return nil // endpoint rules are enforced by the store
+	}
+	for _, rel := range node.Relationships {
+		if rel.Status != "active" || rel.Kind != DevelopedBy || rel.FromID != fromID || rel.ToID == toID {
+			continue
+		}
+		if _, err := s.RetireRelationship(ctx, DevelopedBy, fromID, rel.ToID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Ownership RACI (accountable/consulted/informed) is not stored on process-step
+// CIs; responsible remains allowed for Process Mapper "performed by".
+func (s *Service) rejectProcessStepOwnershipRACI(ctx context.Context, kind RelationshipKind, fromID string) error {
+	switch kind {
+	case Accountable, Consulted, Informed:
+	default:
+		return nil
+	}
+	node, err := s.store.GetNode(ctx, CI, fromID, false)
+	if err != nil {
+		return nil // non-CI from ends are validated by the store
+	}
+	if propertyString(node.Properties, "ciType") == string(ProcessStepCI) {
+		return fmt.Errorf("%w: process-step CIs do not carry %s ownership; use the parent process", ErrInvalid, kind)
+	}
+	return nil
 }
 
 func (s *Service) GetRelationship(ctx context.Context, kind RelationshipKind, fromID, toID string, includeRetired bool) (*Relationship, error) {
@@ -809,11 +1060,23 @@ func validateProperties(properties map[string]any) (map[string]any, error) {
 		if value == nil {
 			return nil, fmt.Errorf("%w: property %q cannot be null", ErrInvalid, key)
 		}
-		switch value.(type) {
+		switch typed := value.(type) {
 		case string, bool, int, int64, float64:
 			clean[key] = value
+		case []string:
+			clean[key] = append([]string(nil), typed...)
+		case []any:
+			list := make([]string, 0, len(typed))
+			for _, item := range typed {
+				text, ok := item.(string)
+				if !ok {
+					return nil, fmt.Errorf("%w: property %q must be a string, boolean, number, or list of strings", ErrInvalid, key)
+				}
+				list = append(list, text)
+			}
+			clean[key] = list
 		default:
-			return nil, fmt.Errorf("%w: property %q must be a string, boolean, or number", ErrInvalid, key)
+			return nil, fmt.Errorf("%w: property %q must be a string, boolean, number, or list of strings", ErrInvalid, key)
 		}
 	}
 	return clean, nil

@@ -70,12 +70,17 @@ func TestRelationshipInverses(t *testing.T) {
 		Affects:      "affected-by",
 		Changes:      "changed-by",
 		AssignedTo:   "assignee-of",
+		CaseFor:      "has-case",
 		ObservedOn:   "observed",
 		DependsOn:    "depended-on-by",
 		Hosts:        "hosted-by",
 		Uses:         "used-by",
 		Governs:      "governed-by",
 		Provides:     "provided-by",
+		ProcessStep:    "step-in",
+		NextInProcess:  "previous-in-process",
+		TriggeredBy:    "triggers",
+		Produces:       "produced-by",
 		Member:       "member-of",
 		DraftedRequest: "drafted-request-for",
 		FormSubmitted:  "submitted-by",
@@ -104,6 +109,7 @@ func TestRelationshipInverses(t *testing.T) {
 		Responsible:  "responsible-for",
 		Consulted:    "consulted-on",
 		Informed:     "informed-of",
+		DevelopedBy:  "developer-of",
 	}
 	for _, kind := range RelationshipKinds() {
 		definition, err := RelationshipDefinitionFor(kind)
@@ -133,6 +139,10 @@ func TestRelationshipInverses(t *testing.T) {
 	if accountable.From != CI || len(accountable.ToKinds) != 1 || accountable.ToKinds[0] != Identity {
 		t.Errorf("accountable definition = %+v, want ci -> identity only", accountable)
 	}
+	developedBy, _ := RelationshipDefinitionFor(DevelopedBy)
+	if developedBy.From != CI || developedBy.To != Identity || len(developedBy.ToKinds) != 1 || developedBy.ToKinds[0] != Identity || strings.Join(CITypeNamesOf(developedBy.FromCITypes), ",") != "automation" {
+		t.Errorf("developed-by definition = %+v, want automation CI -> identity", developedBy)
+	}
 	for _, kind := range []RelationshipKind{Responsible, Consulted, Informed} {
 		definition, _ := RelationshipDefinitionFor(kind)
 		if definition.From != CI || definition.To != Identity || len(definition.ToKinds) != 2 || definition.ToKinds[0] != Identity || definition.ToKinds[1] != Group {
@@ -147,8 +157,12 @@ func TestRelationshipInverses(t *testing.T) {
 		t.Errorf("grants definition = %+v, want birthright -> role or entitlement", grants)
 	}
 	assigned, _ := RelationshipDefinitionFor(AssignedTo)
-	if assigned.From != Incident || assigned.TypeName != "ASSIGNED_TO" || len(assigned.ToKinds) != 2 || assigned.ToKinds[0] != Identity || assigned.ToKinds[1] != Group {
-		t.Errorf("assigned-to definition = %+v, want incident -> identity or group", assigned)
+	if assigned.From != Incident || assigned.TypeName != "ASSIGNED_TO" || len(assigned.FromKinds) != 2 || assigned.FromKinds[1] != Case || len(assigned.ToKinds) != 2 || assigned.ToKinds[0] != Identity || assigned.ToKinds[1] != Group {
+		t.Errorf("assigned-to definition = %+v, want incident or case -> identity or group", assigned)
+	}
+	caseFor, _ := RelationshipDefinitionFor(CaseFor)
+	if caseFor.From != Case || caseFor.Inverse != "has-case" || strings.Join(CITypeNamesOf(caseFor.ToCITypes), ",") != "process-step" {
+		t.Errorf("case-for definition = %+v", caseFor)
 	}
 	drafted, _ := RelationshipDefinitionFor(DraftedRequest)
 	if drafted.From != Identity || drafted.To != Request || drafted.TypeName != "DRAFTED_REQUEST" || len(drafted.ToKinds) != 1 {
@@ -161,6 +175,28 @@ func TestRelationshipInverses(t *testing.T) {
 	provides, _ := RelationshipDefinitionFor(Provides)
 	if provides.From != CI || provides.To != CI || strings.Join(CITypeNamesOf(provides.FromCITypes), ",") != "service,function,vendor" || strings.Join(CITypeNamesOf(provides.ToCITypes), ",") != "service,function,application,server,printer" || len(provides.CITypeRules) != 2 {
 		t.Errorf("provides definition = %+v, want service/function and vendor pairing rules", provides)
+	}
+	processStep, _ := RelationshipDefinitionFor(ProcessStep)
+	if processStep.Inverse != "step-in" || strings.Join(CITypeNamesOf(processStep.FromCITypes), ",") != "process" || strings.Join(CITypeNamesOf(processStep.ToCITypes), ",") != "process-step" {
+		t.Errorf("process-step definition = %+v", processStep)
+	}
+	nextInProcess, _ := RelationshipDefinitionFor(NextInProcess)
+	if nextInProcess.Inverse != "previous-in-process" || strings.Join(CITypeNamesOf(nextInProcess.FromCITypes), ",") != "process-step" || strings.Join(CITypeNamesOf(nextInProcess.ToCITypes), ",") != "process-step" {
+		t.Errorf("next-in-process definition = %+v", nextInProcess)
+	}
+	triggeredBy, _ := RelationshipDefinitionFor(TriggeredBy)
+	if triggeredBy.Inverse != "triggers" || strings.Join(CITypeNamesOf(triggeredBy.FromCITypes), ",") != "process" || len(triggeredBy.ToKinds) != 3 || triggeredBy.ToKinds[0] != CI || triggeredBy.ToKinds[1] != Identity || triggeredBy.ToKinds[2] != Group {
+		t.Errorf("triggered-by definition = %+v", triggeredBy)
+	}
+	produces, _ := RelationshipDefinitionFor(Produces)
+	if produces.Inverse != "produced-by" || strings.Join(CITypeNamesOf(produces.FromCITypes), ",") != "process,function,process-step" {
+		t.Errorf("produces definition = %+v", produces)
+	}
+	if AllowsRACIOwnership(ProcessStepCI) || !AllowsRACIOwnership(Process) {
+		t.Errorf("AllowsRACIOwnership(process-step)=%v AllowsRACIOwnership(process)=%v", AllowsRACIOwnership(ProcessStepCI), AllowsRACIOwnership(Process))
+	}
+	if !RequiresExecution(ProcessStepCI) || RequiresExecution(Process) {
+		t.Errorf("RequiresExecution mismatch")
 	}
 	for _, pairing := range []struct {
 		from, to CIType
@@ -186,7 +222,7 @@ func TestRelationshipInverses(t *testing.T) {
 	if _, _, ok := LinkedCIRelationship(Role); ok {
 		t.Error("LinkedCIRelationship(role) should not be linkable")
 	}
-	if names := RelationshipTypeNames(); len(names) != len(RelationshipKinds()) || names[len(names)-1] != "INFORMED" {
+	if names := RelationshipTypeNames(); len(names) != len(RelationshipKinds()) || names[len(names)-1] != "DEVELOPED_BY" {
 		t.Errorf("RelationshipTypeNames() = %v", names)
 	}
 }
@@ -201,6 +237,13 @@ func TestApplicationHosting(t *testing.T) {
 	}
 	if properties["hosted"] != "external" {
 		t.Errorf("hosted was not normalized: %#v", properties["hosted"])
+	}
+	if err := validateCIProperties(CI, map[string]any{"ciType": "process-step", "name": "Review"}, true); !errors.Is(err, ErrInvalid) {
+		t.Errorf("create process-step without execution error = %v, want ErrInvalid", err)
+	}
+	stepProps := map[string]any{"ciType": "process-step", "name": "Review", "execution": "Manual"}
+	if err := validateCIProperties(CI, stepProps, true); err != nil || stepProps["execution"] != "manual" {
+		t.Errorf("create process-step with execution: %v %#v", err, stepProps)
 	}
 	if err := validateCIProperties(CI, map[string]any{"ciType": "application", "hosted": "cloud"}, true); !errors.Is(err, ErrInvalid) {
 		t.Errorf("unknown hosted error = %v, want ErrInvalid", err)
@@ -410,13 +453,48 @@ func TestVendorRequestLifecycle(t *testing.T) {
 }
 
 func TestParseCIType(t *testing.T) {
-	for _, input := range []string{"Server", "printer", "Data Connector", "Application", "Service", "Process", "function", "Location", "Contract", "Vendor"} {
+	for _, input := range []string{"Server", "printer", "Data Connector", "Application", "Service", "Process", "function", "Automation", "Location", "Contract", "Vendor"} {
 		if _, err := ParseCIType(input); err != nil {
 			t.Errorf("ParseCIType(%q): %v", input, err)
 		}
 	}
 	if _, err := ParseCIType("Laptop"); err == nil {
 		t.Fatal("ParseCIType accepted an ungoverned CI type")
+	}
+}
+
+func TestAutomationCIs(t *testing.T) {
+	if err := validateCIProperties(CI, map[string]any{"ciType": "automation", "name": "Nightly sync"}, true); !errors.Is(err, ErrInvalid) {
+		t.Errorf("automation without environment/triggerType error = %v, want ErrInvalid", err)
+	}
+	properties := map[string]any{"ciType": "Automation", "name": "Nightly sync", "description": "Loads loans", "environment": "Production", "triggerType": "Scheduled", "critical": true}
+	if err := validateCIProperties(CI, properties, true); err != nil {
+		t.Fatalf("automation with fields: %v", err)
+	}
+	if properties["ciType"] != "automation" || properties["environment"] != "production" || properties["triggerType"] != "scheduled" || properties["critical"] != true {
+		t.Errorf("automation properties were not normalized: %#v", properties)
+	}
+	if err := validateCIProperties(CI, map[string]any{"ciType": "automation", "environment": "staging", "triggerType": "api"}, true); !errors.Is(err, ErrInvalid) {
+		t.Errorf("unknown environment error = %v, want ErrInvalid", err)
+	}
+	if err := validateCIProperties(CI, map[string]any{"ciType": "automation", "environment": "test", "triggerType": "webhook"}, true); !errors.Is(err, ErrInvalid) {
+		t.Errorf("unknown triggerType error = %v, want ErrInvalid", err)
+	}
+	if err := validateCIProperties(CI, map[string]any{"ciType": "server", "name": "app-01", "environment": "test"}, true); !errors.Is(err, ErrInvalid) {
+		t.Errorf("environment on non-automation CI error = %v, want ErrInvalid", err)
+	}
+	if err := validateCIProperties(Identity, map[string]any{"environment": "test"}, false); !errors.Is(err, ErrInvalid) {
+		t.Errorf("environment on non-CI error = %v, want ErrInvalid", err)
+	}
+	for _, input := range []string{"Development", "test", " PRODUCTION "} {
+		if _, err := ParseAutomationEnvironment(input); err != nil {
+			t.Errorf("ParseAutomationEnvironment(%q): %v", input, err)
+		}
+	}
+	for _, input := range []string{"Scheduled", "event", " Manual ", "API"} {
+		if _, err := ParseAutomationTriggerType(input); err != nil {
+			t.Errorf("ParseAutomationTriggerType(%q): %v", input, err)
+		}
 	}
 }
 
@@ -537,9 +615,9 @@ func TestCreateCIRequiresFixedType(t *testing.T) {
 	}
 }
 
-func TestIncidentAndChangeRequireCIsAtCreation(t *testing.T) {
+func TestIncidentChangeAndCaseRequireCIsAtCreation(t *testing.T) {
 	service := NewService(nil)
-	for _, kind := range []NodeKind{Incident, Change} {
+	for _, kind := range []NodeKind{Incident, Change, Case} {
 		if _, err := service.CreateGeneratedNode(context.Background(), kind, nil, nil); !errors.Is(err, ErrInvalid) {
 			t.Errorf("CreateGeneratedNode(%s, no CIs) error = %v, want ErrInvalid", kind, err)
 		}
@@ -550,7 +628,7 @@ func TestIncidentAndChangeRequireCIsAtCreation(t *testing.T) {
 }
 
 func TestGeneratedIDPrefixes(t *testing.T) {
-	for kind, want := range map[NodeKind]string{Identity: "IDN", JobCode: "JOB", Birthright: "BIR", Role: "ROLE", Entitlement: "ENT", Group: "GRP", CI: "CI", Incident: "INC", Change: "CHG", Event: "EVT", Request: "REQ"} {
+	for kind, want := range map[NodeKind]string{Identity: "IDN", JobCode: "JOB", Birthright: "BIR", Role: "ROLE", Entitlement: "ENT", Group: "GRP", CI: "CI", Incident: "INC", Case: "CAS", Change: "CHG", Event: "EVT", Request: "REQ"} {
 		if !RequiresGeneratedID(kind) {
 			t.Errorf("RequiresGeneratedID(%s) = false, want true", kind)
 		}
