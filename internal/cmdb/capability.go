@@ -46,6 +46,10 @@ const (
 	CapIncidentCreate       Capability = "incident:create"
 	CapIncidentUpdate       Capability = "incident:update"
 	CapIncidentRetire       Capability = "incident:retire"
+	CapCaseRead             Capability = "case:read"
+	CapCaseCreate           Capability = "case:create"
+	CapCaseUpdate           Capability = "case:update"
+	CapCaseRetire           Capability = "case:retire"
 	CapChangeRead           Capability = "change:read"
 	CapChangeCreate         Capability = "change:create"
 	CapChangeUpdate         Capability = "change:update"
@@ -67,6 +71,8 @@ const (
 	CapLocationMapUpdate    Capability = "location-map:update"
 	CapLocationMapRetire    Capability = "location-map:retire"
 	CapMapRead              Capability = "map:read"
+	CapProcessMapRead       Capability = "process-map:read"
+	CapProcessMapUpdate     Capability = "process-map:update"
 	CapVendorRequestUse     Capability = "vendor-request:use"
 	CapAccessRequestUse     Capability = "access-request:use"
 	CapWorkflowCreatorUse   Capability = "workflow-creator:use"
@@ -141,6 +147,9 @@ var entitlementCapabilities = map[string][]Capability{
 	"CAT-incidents-read":         {CapIncidentRead},
 	"CAT-incidents-create":       {CapIncidentRead, CapIncidentCreate},
 	"CAT-incidents-admin":        {CapIncidentRead, CapIncidentCreate, CapIncidentUpdate, CapIncidentRetire},
+	"CAT-cases-read":             {CapCaseRead},
+	"CAT-cases-create":           {CapCaseRead, CapCaseCreate},
+	"CAT-cases-admin":            {CapCaseRead, CapCaseCreate, CapCaseUpdate, CapCaseRetire},
 	"CAT-changes-read":           {CapChangeRead},
 	"CAT-changes-admin":          {CapChangeRead, CapChangeCreate, CapChangeUpdate, CapChangeRetire},
 	"CAT-events-read":            {CapEventRead},
@@ -150,6 +159,8 @@ var entitlementCapabilities = map[string][]Capability{
 	"CMDB-configitems-read":      {CapConfigItemRead},
 	"CMDB-configitems-admin":     {CapConfigItemRead, CapConfigItemCreate, CapConfigItemUpdate, CapConfigItemRetire},
 	"CMDB-map-read":              {CapMapRead},
+	"CMDB-processmaps-read":      {CapProcessMapRead},
+	"CMDB-processmaps-admin":     {CapProcessMapRead, CapProcessMapUpdate},
 	"LOC-locationmaps-read":      {CapLocationMapRead},
 	"LOC-locationmaps-admin":     {CapLocationMapRead, CapLocationMapCreate, CapLocationMapUpdate, CapLocationMapRetire},
 	"CREQ-vendorrequestform-use": {CapVendorRequestUse},
@@ -214,6 +225,8 @@ func NodeReadCapability(kind NodeKind) (Capability, bool) {
 		return CapGroupRead, true
 	case Incident:
 		return CapIncidentRead, true
+	case Case:
+		return CapCaseRead, true
 	case Change:
 		return CapChangeRead, true
 	case Event:
@@ -298,6 +311,15 @@ func NodeWriteCapability(kind NodeKind, action string) (Capability, bool) {
 		case "retire":
 			return CapIncidentRetire, true
 		}
+	case Case:
+		switch action {
+		case "create":
+			return CapCaseCreate, true
+		case "update":
+			return CapCaseUpdate, true
+		case "retire":
+			return CapCaseRetire, true
+		}
 	case Change:
 		switch action {
 		case "create":
@@ -359,13 +381,17 @@ func RelationshipMutateCapabilities(kind RelationshipKind) []Capability {
 	case Permissions:
 		return []Capability{CapIdentityUpdate, CapRoleUpdate, CapEntitlementUpdate}
 	case Affects, AssignedTo:
-		return []Capability{CapIncidentUpdate, CapIncidentCreate}
+		return []Capability{CapIncidentUpdate, CapIncidentCreate, CapCaseUpdate, CapCaseCreate}
+	case CaseFor:
+		return []Capability{CapCaseUpdate, CapCaseCreate, CapProcessMapUpdate}
 	case Changes:
 		return []Capability{CapChangeUpdate}
 	case ObservedOn:
 		return []Capability{CapEventUpdate}
 	case DependsOn, Hosts, Uses, Governs, Provides:
 		return []Capability{CapRelationshipCreate, CapRelationshipUpdate, CapRelationshipRetire}
+	case ProcessStep, NextInProcess, TriggeredBy, Produces:
+		return []Capability{CapProcessMapUpdate, CapConfigItemUpdate, CapRelationshipCreate, CapRelationshipUpdate, CapRelationshipRetire}
 	case Accountable, Responsible, Consulted, Informed:
 		return []Capability{
 			CapIdentityUpdate, CapJobCodeUpdate, CapBirthrightUpdate, CapRoleUpdate, CapEntitlementUpdate,

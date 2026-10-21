@@ -109,6 +109,8 @@ func NewHandlerWithLogger(service *cmdb.Service, logger *slog.Logger) http.Handl
 	mux.HandleFunc("PUT /api/holidays", api.saveHolidays)
 	mux.HandleFunc("GET /api/form-sla", api.formSLA)
 	mux.HandleFunc("GET /api/capabilities", api.capabilities)
+	mux.HandleFunc("GET /api/process-maps/{processId}", api.getProcessMap)
+	mux.HandleFunc("PUT /api/process-maps/{processId}", api.saveProcessMap)
 
 	static, err := fs.Sub(dashboard, "static")
 	if err != nil {
@@ -172,7 +174,7 @@ func (h *handler) metadata(w http.ResponseWriter, _ *http.Request) {
 		requestFields[name] = cmdb.RequestFieldKeys(cmdb.RequestType(name))
 		fulfilmentFields[name] = cmdb.RequestFulfilmentProperties(cmdb.RequestType(name))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"nodeKinds": cmdb.NodeKinds(), "ciTypes": cmdb.CITypeNames(), "ciCategories": cmdb.CICategoryNames(), "contractTypes": cmdb.ContractTypeNames(), "hostingModels": cmdb.HostingModelNames(), "criticalities": cmdb.CriticalityNames(), "requestTypes": cmdb.RequestTypeNames(), "requestStates": cmdb.RequestStateNames(), "requestFields": requestFields, "fulfilmentFields": fulfilmentFields, "stepTypes": cmdb.StepTypeNames(), "approvalRules": cmdb.ApprovalRuleNames(), "taskActions": cmdb.TaskActionNames(), "raciKinds": cmdb.RACIOwnedKinds(), "accessItemKinds": cmdb.AccessItemKinds(), "accessWorkflowTemplate": cmdb.AccessWorkflowTemplate(), "relationships": relationships})
+	writeJSON(w, http.StatusOK, map[string]any{"nodeKinds": cmdb.NodeKinds(), "ciTypes": cmdb.CITypeNames(), "ciCategories": cmdb.CICategoryNames(), "contractTypes": cmdb.ContractTypeNames(), "hostingModels": cmdb.HostingModelNames(), "executionModels": cmdb.ExecutionModelNames(), "automationEnvironments": cmdb.AutomationEnvironmentNames(), "automationTriggerTypes": cmdb.AutomationTriggerTypeNames(), "triggerActions": cmdb.TriggerActionNames(), "outputActions": cmdb.OutputActionNames(), "criticalities": cmdb.CriticalityNames(), "requestTypes": cmdb.RequestTypeNames(), "requestStates": cmdb.RequestStateNames(), "requestFields": requestFields, "fulfilmentFields": fulfilmentFields, "stepTypes": cmdb.StepTypeNames(), "approvalRules": cmdb.ApprovalRuleNames(), "taskActions": cmdb.TaskActionNames(), "raciKinds": cmdb.RACIOwnedKinds(), "accessItemKinds": cmdb.AccessItemKinds(), "accessWorkflowTemplate": cmdb.AccessWorkflowTemplate(), "relationships": relationships})
 }
 
 func (h *handler) listWorkflows(w http.ResponseWriter, r *http.Request) {
@@ -223,6 +225,40 @@ func (h *handler) getWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, workflow)
+}
+
+func (h *handler) getProcessMap(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireAnyCapability(w, r, cmdb.CapProcessMapRead, cmdb.CapConfigItemRead); !ok {
+		return
+	}
+	processMap, err := h.service.GetProcessMap(r.Context(), r.PathValue("processId"))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, processMap)
+}
+
+func (h *handler) saveProcessMap(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireAnyCapability(w, r, cmdb.CapProcessMapUpdate, cmdb.CapConfigItemUpdate); !ok {
+		return
+	}
+	input, err := decodeJSON[cmdb.ProcessMap](w, r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	processID := r.PathValue("processId")
+	if strings.TrimSpace(input.ProcessID) != "" && input.ProcessID != processID {
+		writeError(w, http.StatusBadRequest, "processId in the body does not match the path")
+		return
+	}
+	processMap, err := h.service.SaveProcessMap(r.Context(), processID, input)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, processMap)
 }
 
 func (h *handler) updateWorkflow(w http.ResponseWriter, r *http.Request) {

@@ -16,7 +16,7 @@ import {
   type NodeProps,
   useReactFlow,
 } from "@xyflow/react";
-import { ArrowDown, ArrowDownLeft, ArrowUpRight, BriefcaseBusiness, CircleAlert, RefreshCw, Search, SquareArrowOutUpRight, X } from "lucide-react";
+import { ArrowDown, ArrowDownLeft, ArrowUpRight, BriefcaseBusiness, CircleAlert, RefreshCw, Search, Settings, SquareArrowOutUpRight, Ticket, Waypoints, X } from "lucide-react";
 import dagre from "dagre";
 import { getAccessAnomalies, getNodes, getRelationships, nodeDisplayName, relationshipLabel, relationshipSourceKey, relationshipTargetKey } from "./api";
 import type { CIType, GraphNode, GraphRelationship, Metadata, NodeKind, RelationshipKind } from "./types";
@@ -25,6 +25,7 @@ import "@xyflow/react/dist/style.css";
 interface MapNodeData extends Record<string, unknown> {
   label: string;
   kind: NodeKind;
+  ciType?: string;
   status: "active" | "retired";
   detail: string;
   selected: boolean;
@@ -104,6 +105,7 @@ const kindTones: Record<NodeKind, string> = {
   group: "slate",
   ci: "blue",
   incident: "red",
+  case: "red",
   change: "yellow",
   event: "green",
   request: "slate",
@@ -197,6 +199,7 @@ function layoutGraph(nodes: GraphNode[], relationships: GraphRelationship[], def
       data: {
         label: displayName(node),
         kind: node.kind,
+        ciType: node.kind === "ci" && typeof node.properties?.ciType === "string" ? node.properties.ciType : undefined,
         status: node.status,
         detail: node.properties?.externalId ? String(node.properties.externalId) : node.id,
         selected: id === selectedNodeID,
@@ -295,12 +298,16 @@ function MapLinkEdge({ id, sourceX, sourceY, targetX, targetY, data, style, mark
 }
 
 function MapRecordNode({ id, data }: NodeProps<MapFlowNode>) {
-  return <div className={`map-record-node tone-${kindTones[data.kind]} ${data.status === "retired" ? "map-record-retired" : ""} ${data.selected ? "map-record-selected" : ""} ${data.dimmed ? "map-record-dimmed" : ""} ${data.anomaly ? "map-record-anomaly" : ""} ${data.down ? "map-record-down" : ""}`} onClick={(event) => { event.stopPropagation(); data.onSelect(id); }}>
+  const isAutomation = data.ciType === "automation";
+  return <div className={`map-record-node tone-${kindTones[data.kind]} ${data.status === "retired" ? "map-record-retired" : ""} ${data.selected ? "map-record-selected" : ""} ${data.dimmed ? "map-record-dimmed" : ""} ${data.anomaly ? "map-record-anomaly" : ""} ${data.down ? "map-record-down" : ""} ${isAutomation ? "map-record-automation" : ""}`} onClick={(event) => { event.stopPropagation(); data.onSelect(id); }}>
     <Handle type="target" position={Position.Left} isConnectable={false} />
     {data.down && <span className="map-record-down-badge" title="Node is down (open incident or impacted by one)" aria-label="Node is down"><ArrowDown size={16} strokeWidth={2.6} /></span>}
     {data.anomaly && <span className="map-record-anomaly-badge" title="Access anomaly: overlapping birthright, role, or direct permission paths" aria-label="Access anomaly"><CircleAlert size={16} strokeWidth={2.4} /></span>}
     <div className="map-record-heading">
-      <span className="map-record-kind">{data.kind === "ci" ? "CI" : data.kind.toUpperCase()}</span>
+      <span className="map-record-kind">
+        {isAutomation && <Settings size={12} strokeWidth={2.2} className="map-record-ci-icon" aria-hidden />}
+        {data.kind === "ci" ? "CI" : data.kind.toUpperCase()}
+      </span>
       <span className={`map-record-status ${data.status}`}>{data.status}</span>
     </div>
     <strong className="map-record-label">{data.label}</strong>
@@ -395,9 +402,9 @@ function RelationshipTraceList({ direction, traces, definitions, onSelect }: {
   </div>;
 }
 
-type LinkedRecordKind = "incident" | "change";
+type LinkedRecordKind = "incident" | "change" | "case";
 
-function SelectedNodePanel({ node, upstream, downstream, definitions, hasAnomaly, isDown, onClose, onSelect, onCreateLinked, onEdit }: {
+function SelectedNodePanel({ node, upstream, downstream, definitions, hasAnomaly, isDown, onClose, onSelect, onCreateLinked, onEdit, onOpenProcessMapper }: {
   node: GraphNode;
   upstream: RelationshipTrace[];
   downstream: RelationshipTrace[];
@@ -408,15 +415,19 @@ function SelectedNodePanel({ node, upstream, downstream, definitions, hasAnomaly
   onSelect: (node: GraphNode) => void;
   onCreateLinked?: (kind: LinkedRecordKind, ci: GraphNode) => void;
   onEdit?: (node: GraphNode) => void;
+  onOpenProcessMapper?: (process: GraphNode) => void;
 }) {
   const label = nodeLabel(node);
+  const isAutomation = node.kind === "ci" && node.properties?.ciType === "automation";
   // Incidents and changes attach to CIs (affects / changes), so only offer them for active CI records.
   const canCreateLinked = Boolean(onCreateLinked) && node.kind === "ci" && node.status === "active";
+  const canCreateCase = canCreateLinked && node.properties?.ciType === "process-step" && node.properties?.createsCase === true;
+  const canOpenProcessMapper = Boolean(onOpenProcessMapper) && node.kind === "ci" && node.properties?.ciType === "process" && node.status === "active";
   // Every record on the map opens in the same editor the list views use.
   const canEdit = Boolean(onEdit);
   return <aside className="map-inspector" aria-label="Selected record relationships">
     <header className="map-inspector-header">
-      <div><p className="eyebrow">SELECTED RECORD</p><h2>{label.name}</h2></div>
+      <div><p className="eyebrow">SELECTED RECORD</p><h2 className={isAutomation ? "map-inspector-title-with-icon" : undefined}>{isAutomation && <Settings size={18} strokeWidth={2.2} aria-hidden />}<span>{label.name}</span></h2></div>
       <div className="map-inspector-controls">
         {canEdit && <button className="close-button" type="button" onClick={() => onEdit?.(node)} aria-label={`Open ${label.name} in the editor`} title="Open in editor"><SquareArrowOutUpRight size={16} /></button>}
         <button className="close-button" type="button" onClick={onClose} aria-label="Close relationship details"><X size={16} /></button>
@@ -426,9 +437,11 @@ function SelectedNodePanel({ node, upstream, downstream, definitions, hasAnomaly
     {isDown && <p className="form-error map-inspector-anomaly" role="status">This CI is down: an open incident has Node is down checked on it, or it is impacted through hosts, provides, depends-on, or uses links.</p>}
     {hasAnomaly && <p className="form-error map-inspector-anomaly" role="status">This identity holds the same access through more than one path. Review Access anomalies on the Birthrights page.</p>}
     <code className="map-inspector-id">{node.id}</code>
-    {canCreateLinked && <div className="map-inspector-actions">
-      <button className="button button-quiet icon-button" type="button" onClick={() => onCreateLinked?.("incident", node)}><BriefcaseBusiness size={14} />Create incident</button>
-      <button className="button button-quiet icon-button" type="button" onClick={() => onCreateLinked?.("change", node)}><RefreshCw size={14} />Create change</button>
+    {(canCreateLinked || canOpenProcessMapper) && <div className="map-inspector-actions">
+      {canOpenProcessMapper && <button className="button button-quiet icon-button" type="button" onClick={() => onOpenProcessMapper?.(node)}><Waypoints size={14} />Open Process Mapper</button>}
+      {canCreateLinked && <button className="button button-quiet icon-button" type="button" onClick={() => onCreateLinked?.("incident", node)}><BriefcaseBusiness size={14} />Create incident</button>}
+      {canCreateCase && <button className="button button-quiet icon-button" type="button" onClick={() => onCreateLinked?.("case", node)}><Ticket size={14} />Create case</button>}
+      {canCreateLinked && <button className="button button-quiet icon-button" type="button" onClick={() => onCreateLinked?.("change", node)}><RefreshCw size={14} />Create change</button>}
     </div>}
     <section className="trace-section">
       <div className="trace-section-heading"><h3>Upstream</h3><span>{upstream.length}</span></div>
@@ -441,12 +454,13 @@ function SelectedNodePanel({ node, upstream, downstream, definitions, hasAnomaly
   </aside>;
 }
 
-export default function GraphMap({ metadata, includeRetired, reload, onToggleIncludeRetired, onCreateLinked, onEdit }: {
+export default function GraphMap({ metadata, includeRetired, reload, onToggleIncludeRetired, onCreateLinked, onEdit, onOpenProcessMapper }: {
   metadata: Metadata | null;
   includeRetired: boolean;
   reload: number;
   onToggleIncludeRetired: () => void;
   onCreateLinked?: (kind: LinkedRecordKind, ci: GraphNode) => void;
+  onOpenProcessMapper?: (process: GraphNode) => void;
   onEdit?: (node: GraphNode) => void;
 }) {
   const [nodes, setNodes] = useState<GraphNode[]>([]);
@@ -587,12 +601,14 @@ export default function GraphMap({ metadata, includeRetired, reload, onToggleInc
         onClose={() => setSelectedNodeID(null)}
         onSelect={(node) => setSelectedNodeID(nodeID(node))}
         onCreateLinked={onCreateLinked}
+        onOpenProcessMapper={onOpenProcessMapper}
         onEdit={onEdit}
       />}
     </div>
     <div className="map-legend" aria-label="Map legend">
       <span><i className="legend-swatch ci" />CI</span>
       <span><i className="legend-swatch incident" />Incident</span>
+      <span><i className="legend-swatch incident" />Case</span>
       <span><i className="legend-swatch change" />Change</span>
       <span><i className="legend-swatch event" />Event</span>
       <span className="map-legend-down"><ArrowDown size={12} strokeWidth={2.6} aria-hidden="true" />Node down</span>

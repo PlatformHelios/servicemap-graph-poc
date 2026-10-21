@@ -34,6 +34,8 @@ export function canViewResource(access: ActorAccess | null | undefined, resource
       return hasCapability(access, "group:read");
     case "incident":
       return hasCapability(access, "incident:read");
+    case "case":
+      return hasCapability(access, "case:read");
     case "change":
       return hasCapability(access, "change:read");
     case "event":
@@ -44,6 +46,8 @@ export function canViewResource(access: ActorAccess | null | undefined, resource
       return hasCapability(access, "map:read");
     case "ci":
       return hasCapability(access, "config-item:read");
+    case "process-mapper":
+      return hasAnyCapability(access, ["process-map:read", "config-item:read"]);
     case "location-map":
       return hasCapability(access, "location-map:read");
     case "request":
@@ -80,6 +84,8 @@ export function canCreateResource(access: ActorAccess | null | undefined, resour
       return hasCapability(access, "group:create");
     case "incident":
       return hasCapability(access, "incident:create");
+    case "case":
+      return hasCapability(access, "case:create");
     case "change":
       return hasCapability(access, "change:create");
     case "event":
@@ -115,6 +121,8 @@ export function canUpdateResource(access: ActorAccess | null | undefined, resour
       return hasCapability(access, "group:update");
     case "incident":
       return hasCapability(access, "incident:update");
+    case "case":
+      return hasCapability(access, "case:update");
     case "change":
       return hasCapability(access, "change:update");
     case "event":
@@ -123,6 +131,8 @@ export function canUpdateResource(access: ActorAccess | null | undefined, resour
       return hasCapability(access, "relationship:update");
     case "ci":
       return hasCapability(access, "config-item:update");
+    case "process-mapper":
+      return hasAnyCapability(access, ["process-map:update", "config-item:update"]);
     case "location-map":
       return hasCapability(access, "location-map:update");
     case "request":
@@ -150,6 +160,8 @@ export function canRetireResource(access: ActorAccess | null | undefined, resour
       return hasCapability(access, "group:retire");
     case "incident":
       return hasCapability(access, "incident:retire");
+    case "case":
+      return hasCapability(access, "case:retire");
     case "change":
       return hasCapability(access, "change:retire");
     case "event":

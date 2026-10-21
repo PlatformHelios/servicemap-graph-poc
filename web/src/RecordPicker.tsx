@@ -1,7 +1,11 @@
 import { useState } from "react";
-import { Search, X } from "lucide-react";
+import { Search, Settings, X } from "lucide-react";
 import { nodeDisplayName } from "./api";
 import type { GraphNode } from "./types";
+
+function isAutomationCI(node: GraphNode) {
+  return node.kind === "ci" && node.properties?.ciType === "automation";
+}
 
 export function titleCase(value: string) {
   return value.replaceAll("-", " ").replace(/\b\w/g, (character) => character.toUpperCase());
@@ -47,8 +51,8 @@ export default function RecordPicker({ id, label, hint, placeholder, options, se
 
   return <div className="form-field raci-role">
     <label htmlFor={id}>{label} <span className="ci-selection-count">{single ? (selected.length ? "assigned" : "not assigned") : `${selected.length} selected`}</span></label>
-    {chosen.length > 0 && <ul className="raci-chips" aria-label={`${label} assignments`}>{chosen.map((node) => <li className="raci-chip" key={node.id}>
-      <span><strong>{nodeDisplayName(node) ?? node.id}</strong><small>{pickerSubtitle(node)}</small></span>
+    {chosen.length > 0 && <ul className="raci-chips" aria-label={`${label} assignments`}>{chosen.map((node) => <li className={`raci-chip${isAutomationCI(node) ? " raci-chip-automation" : ""}`} key={node.id}>
+      <span><strong>{isAutomationCI(node) && <Settings size={12} strokeWidth={2.2} className="ci-type-icon" aria-hidden />}{nodeDisplayName(node) ?? node.id}</strong><small>{pickerSubtitle(node)}</small></span>
       {!readOnly && <button type="button" aria-label={`Remove ${nodeDisplayName(node) ?? node.id} from ${label}`} onClick={() => onChange(selected.filter((value) => value !== node.id))}><X size={13} /></button>}
     </li>)}</ul>}
     {canAdd && <div className="raci-finder" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false); }}>
@@ -58,7 +62,7 @@ export default function RecordPicker({ id, label, hint, placeholder, options, se
           ? <li className="raci-no-match">No active records match “{query.trim()}”.</li>
           : matches.map((node) => <li key={node.id} role="option" aria-selected={false}>
             <button type="button" className="raci-match" onMouseDown={(event) => event.preventDefault()} onClick={() => pick(node)}>
-              <strong>{nodeDisplayName(node) ?? node.id}</strong><small>{pickerSubtitle(node)}</small>
+              <strong>{isAutomationCI(node) && <Settings size={12} strokeWidth={2.2} className="ci-type-icon" aria-hidden />}{nodeDisplayName(node) ?? node.id}</strong><small>{pickerSubtitle(node)}</small>
             </button>
           </li>)}
       </ul>}

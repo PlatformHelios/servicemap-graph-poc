@@ -700,8 +700,9 @@ func (s *Store) CreateRelationship(ctx context.Context, kind cmdb.RelationshipKi
 	params := map[string]any{"fromId": fromID, "toId": toID, "properties": properties}
 	if len(definition.CITypeRules) > 0 {
 		// The endpoints must satisfy at least one allowed (from, to) CI type pairing;
-		// an empty side of a rule accepts any type at that end.
-		typeFilter = " AND ANY(rule IN $ciTypeRules WHERE (size(rule.from) = 0 OR source.ciType IN rule.from) AND (size(rule.to) = 0 OR target.ciType IN rule.to))"
+		// an empty side of a rule accepts any type at that end. Non-CI endpoints
+		// (identity/group) skip the CI-type check on that side.
+		typeFilter = " AND ANY(rule IN $ciTypeRules WHERE (size(rule.from) = 0 OR source.ciType IN rule.from OR NOT source:CI) AND (size(rule.to) = 0 OR target.ciType IN rule.to OR NOT target:CI))"
 		rules := make([]map[string]any, 0, len(definition.CITypeRules))
 		for _, rule := range definition.CITypeRules {
 			rules = append(rules, map[string]any{"from": cmdb.CITypeNamesOf(rule.From), "to": cmdb.CITypeNamesOf(rule.To)})

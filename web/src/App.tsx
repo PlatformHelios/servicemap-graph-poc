@@ -14,9 +14,12 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Settings,
   ShieldCheck,
+  Ticket,
   Users,
   UsersRound,
+  Waypoints,
   Workflow,
   X,
 } from "lucide-react";
@@ -104,6 +107,7 @@ const formSubmittedKind: RelationshipKind = "form-submitted";
 // point from the application.
 const hasRoleKind: RelationshipKind = "has-role";
 const entitledByKind: RelationshipKind = "entitled-by";
+const developedByKind: RelationshipKind = "developed-by";
 function applicationLinkKind(kind: NodeKind): RelationshipKind {
   return kind === "entitlement" ? entitledByKind : hasRoleKind;
 }
@@ -148,6 +152,10 @@ function assignmentFromResponsible(record: GraphNode | undefined): string[] {
   return groups.length > 0 ? groups : ids;
 }
 
+function assignmentFromPerformers(record: GraphNode | undefined): string[] {
+  return linksFromRecord(record, ["responsible"]).responsible;
+}
+
 // The active records at the far end of a node's direct relationships of one kind.
 function linkedEnds(record: GraphNode | undefined, kind: RelationshipKind, end: "from" | "to"): { id: string; name: string }[] {
   return (record?.relationships ?? [])
@@ -168,6 +176,7 @@ const summaryHeadings: Record<NodeKind, string> = {
   group: "Members",
   ci: "Type and ownership",
   incident: "Assignment",
+  case: "Assignment",
   change: "Changes",
   event: "Observed on",
   request: "Requester",
@@ -233,19 +242,30 @@ function recordSummary(record: GraphNode): { label: string; value: string }[] {
       break;
     case "ci": {
       const ciType = typeof properties.ciType === "string" ? titleCase(properties.ciType) : "";
-      const qualifier = typeof properties.hosted === "string" ? titleCase(properties.hosted) : typeof properties.siteId === "string" ? properties.siteId : typeof properties.contractType === "string" ? contractTypeLabels[properties.contractType] ?? titleCase(properties.contractType) : "";
+      const qualifier = typeof properties.hosted === "string" ? titleCase(properties.hosted)
+        : typeof properties.environment === "string" ? titleCase(properties.environment)
+        : typeof properties.siteId === "string" ? properties.siteId
+        : typeof properties.contractType === "string" ? contractTypeLabels[properties.contractType] ?? titleCase(properties.contractType) : "";
       add("Type", [ciType, qualifier].filter(Boolean).join(" · "));
+      if (typeof properties.triggerType === "string") add("Trigger", automationTriggerTypeLabels[properties.triggerType] ?? titleCase(properties.triggerType));
       if (properties.critical === true) add("Critical", "Yes");
+      if (properties.ciType === "automation") add("Developer", nameList(ends(developedByKind, "to"), "developer"));
       add("Owner", owner);
       add("Has roles", countOf(ends(hasRoleKind, "to"), "role"));
       add("Entitled by", countOf(ends(entitledByKind, "to"), "entitlement"));
       add("Incidents", countOf(ends("affects", "from"), "open incident"));
+      add("Cases", countOf(ends("case-for", "from"), "open case"));
       break;
     }
     case "incident":
       if (properties.nodeDown === true) add("Node down", "Yes");
       add("Assigned to", nameList(ends(incidentAssignmentKind, "to"), "assignee"));
       add("Affects", nameList(ends("affects", "to"), "CI"));
+      break;
+    case "case":
+      if (properties.olaEnabled === true) add("OLA", `${Number(properties.olaBusinessDays) || 0} business days`);
+      add("Assigned to", nameList(ends(incidentAssignmentKind, "to"), "assignee"));
+      add("Process step", nameList(ends("case-for", "to"), "step"));
       break;
     case "change":
       add("Changes", nameList(ends("changes", "to"), "CI"));
@@ -285,6 +305,7 @@ function raciFromRecord(record: GraphNode | undefined): RACIAssignments {
 
 const GraphMap = lazy(() => import("./GraphMap"));
 const LocationMap = lazy(() => import("./LocationMap"));
+const ProcessMapper = lazy(() => import("./ProcessMapper"));
 const WorkflowCreator = lazy(() => import("./WorkflowCreator"));
 const WorkflowTasks = lazy(() => import("./WorkflowTasks"));
 const AccessRequestForm = lazy(() => import("./AccessRequestForm"));
@@ -302,7 +323,9 @@ const resourceInfo: Record<Resource, { title: string; singular: string; subtitle
   map: { title: "Graph map", singular: "record", subtitle: "Explore configuration items and their connected records.", kicker: "RELATIONSHIP MAP" },
   "location-map": { title: "Location maps", singular: "location", subtitle: "Sites plotted from their addresses; green when open, grey when closed.", kicker: "LOCATIONS" },
   ci: { title: "Configuration items", singular: "configuration item", subtitle: "Managed assets with governed CI types.", kicker: "CONFIGURATION ITEMS" },
+  "process-mapper": { title: "Process Mapper", singular: "process map", subtitle: "Map how a business process runs: triggers, ordered steps, performers, and outputs—stored as CMDB relationships.", kicker: "CMDB" },
   incident: { title: "Incidents", singular: "incident", subtitle: "Operational incidents associated with configuration items.", kicker: "INCIDENT MANAGEMENT" },
+  case: { title: "Cases", singular: "case", subtitle: "Process tickets raised from a process step. Assigned to who performs the step, with an optional OLA.", kicker: "CASE MANAGEMENT" },
   change: { title: "Changes", singular: "change", subtitle: "Controlled changes that affect configuration items.", kicker: "CHANGE MANAGEMENT" },
   event: { title: "Events", singular: "event", subtitle: "Observed events associated with configuration items.", kicker: "EVENT STREAM" },
   request: { title: "Vendor Request Form", singular: "vendor request", subtitle: "Request a new vendor. Save a draft to finish later; submit once every required field is complete.", kicker: "CATALOG REQUESTS" },
@@ -317,7 +340,7 @@ const resourceInfo: Record<Resource, { title: string; singular: string; subtitle
 };
 
 // A named form field; `group` starts a labelled section (rendered once per run of fields).
-type FormField = { key: string; label: string; options?: string[]; group?: string; checkbox?: boolean; hint?: string };
+type FormField = { key: string; label: string; options?: string[]; group?: string; checkbox?: boolean; number?: boolean; hint?: string };
 
 const nodeFields: Record<NodeKind, FormField[]> = {
   identity: [
@@ -346,10 +369,16 @@ const nodeFields: Record<NodeKind, FormField[]> = {
     { key: "name", label: "Group name" },
     { key: "description", label: "Description" },
   ],
-  ci: [{ key: "ciType", label: "CI type", options: ["server", "printer", "data-connector", "application", "service", "process", "function", "location", "contract"] }],
+  ci: [{ key: "ciType", label: "CI type", options: ["server", "printer", "data-connector", "application", "service", "process", "function", "process-step", "automation", "location", "contract", "vendor"] }],
   incident: [
     { key: "name", label: "Summary" },
     { key: "nodeDown", label: "Node is down", checkbox: true, hint: "Mark when the affected configuration item is currently unavailable." },
+  ],
+  case: [
+    { key: "name", label: "Summary" },
+    { key: "description", label: "Description" },
+    { key: "olaEnabled", label: "Measure against an OLA", checkbox: true, hint: "Copied from the process step when the case is raised; change it if this ticket needs a different target." },
+    { key: "olaBusinessDays", label: "OLA business days", number: true },
   ],
   change: [{ key: "name", label: "Summary" }],
   event: [{ key: "name", label: "Summary" }],
@@ -383,6 +412,26 @@ const applicationFields: FormField[] = [
   { key: "name", label: "Name" },
   { key: "description", label: "Description" },
   { key: "hosted", label: "Hosted", options: hostingOptions },
+  criticalCIField,
+];
+const executionOptions = ["manual", "automated"];
+const processStepFields: FormField[] = [
+  { key: "name", label: "Name" },
+  { key: "description", label: "Description" },
+  { key: "execution", label: "Execution", options: executionOptions },
+  { key: "createsCase", label: "Allow case creation", checkbox: true, hint: "Does not create a case automatically. When checked, a Case can be raised for this step (API or Cases / Tickets) and is assigned to Performed by." },
+  { key: "olaEnabled", label: "Measure this step against an OLA", checkbox: true, hint: "Business days allowed for the step (and any case it raises)." },
+  { key: "olaBusinessDays", label: "OLA business days", number: true },
+  criticalCIField,
+];
+const automationEnvironmentOptions = ["development", "test", "production"];
+const automationTriggerTypeOptions = ["scheduled", "event", "manual", "api"];
+const automationTriggerTypeLabels: Record<string, string> = { scheduled: "Scheduled", event: "Event", manual: "Manual", api: "API" };
+const automationFields: FormField[] = [
+  { key: "name", label: "Name" },
+  { key: "description", label: "Description" },
+  { key: "environment", label: "Environment", options: automationEnvironmentOptions },
+  { key: "triggerType", label: "Trigger type", options: automationTriggerTypeOptions },
   criticalCIField,
 ];
 
@@ -499,6 +548,8 @@ function nodeFieldsFor(kind: NodeKind, properties: Properties, metadata: Metadat
   if (ciType === "contract") return [...fields, ...contractFields];
   if (ciType === "vendor") return [...fields, ...vendorFields];
   if (ciType === "application") return [...fields, ...applicationFields];
+  if (ciType === "process-step") return [...fields, ...processStepFields];
+  if (ciType === "automation") return [...fields, ...automationFields];
   if (describedCITypes.has(ciType)) return [...fields, ...describedCIFields];
   return [...fields, criticalCIField];
 }
@@ -523,7 +574,8 @@ const navigation: { label: string; items: { kind: Resource; title: string; Icon:
     { kind: "group", title: "Groups", Icon: UsersRound },
   ] },
   { label: "CASES / TICKETS", items: [
-    { kind: "incident", title: "Incidents", Icon: BriefcaseBusiness },
+    { kind: "case", title: "Cases", Icon: BriefcaseBusiness },
+    { kind: "incident", title: "Incidents", Icon: Ticket },
     { kind: "change", title: "Changes", Icon: RefreshCw },
     { kind: "event", title: "Events", Icon: Link2 },
   ] },
@@ -531,6 +583,7 @@ const navigation: { label: string; items: { kind: Resource; title: string; Icon:
     { kind: "relationships", title: "Relationships", Icon: Link2 },
     { kind: "map", title: "Map", Icon: Network },
     { kind: "ci", title: "Configuration items", Icon: PackageOpen },
+    { kind: "process-mapper", title: "Process Mapper", Icon: Waypoints },
   ] },
   { label: "LOCATIONS", items: [
     { kind: "location-map", title: "Location Maps", Icon: MapPin },
@@ -550,7 +603,7 @@ function chromeFor(resource: Resource) {
 }
 
 // Views that render their own panel instead of a record table.
-const canvasResources = new Set<Resource>(["home", "map", "location-map", "workflow-creator", "workflow-tasks", "access-request"]);
+const canvasResources = new Set<Resource>(["home", "map", "location-map", "process-mapper", "workflow-creator", "workflow-tasks", "access-request"]);
 // Workflow records opened from the map go to the view that manages them rather than the record editor.
 const workflowNodeKinds = new Set<NodeKind>(["workflow", "workflow-step", "workflow-run", "task"]);
 
@@ -613,6 +666,7 @@ function App() {
   const [editor, setEditor] = useState<RecordEditorTarget | null>(null);
   const [retiring, setRetiring] = useState<RetireTarget | null>(null);
   const [toast, setToast] = useState("");
+  const [processMapperId, setProcessMapperId] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
   // The Vendor Request Form view is the form itself: a blank request ready for
   // entry, or a saved request reopened from the list beneath it. The version
@@ -631,7 +685,7 @@ function App() {
       if (active) setError("Could not connect to the API.");
     });
     return () => { active = false; };
-  }, []);
+  }, [reload]);
 
   useEffect(() => {
     setApiActor(actingAs || superAdmin.id);
@@ -780,7 +834,7 @@ function App() {
         // what is stored by creating new links and retiring removed ones.
         if (links) {
           const kinds = Object.keys(links) as RelationshipKind[];
-          const current = linksFromRecord(target.record, kinds);
+          const current = linksFromRecord(target.record ?? saved, kinds);
           for (const kind of kinds) {
             const wanted = links[kind] ?? [];
             const incoming = isIncomingLink(kind, target.kind);
@@ -836,7 +890,7 @@ function App() {
             <div className="rail-section-label">{label}</div>
             <nav className="resource-nav" aria-label={label}>
               {visible.map(({ kind, title, Icon }) => (
-                <button className={`nav-item ${resource === kind ? "active" : ""}`} key={kind} onClick={() => { setResource(kind); setSearch(""); setRequestRecord(null); }}>
+                <button className={`nav-item ${resource === kind ? "active" : ""}`} key={kind} onClick={() => { setResource(kind); setSearch(""); setRequestRecord(null); if (kind !== "process-mapper") setProcessMapperId(null); else if (resource !== "process-mapper") setProcessMapperId(null); }}>
                   <Icon aria-hidden="true" size={17} strokeWidth={1.7} />{title}
                 </button>
               ))}
@@ -891,14 +945,20 @@ function App() {
               kind,
               ciIds: [record.id],
               ...(kind === "incident" ? { assignedTo: assignmentFromResponsible(record) } : {}),
+              ...(kind === "case" ? { assignedTo: assignmentFromPerformers(record) } : {}),
             });
             getNode(ci.kind, ci.id, true).then(open).catch(() => open(ci));
+          }} onOpenProcessMapper={(process) => {
+            setProcessMapperId(process.id);
+            setResource("process-mapper");
+            setSearch("");
           }} onEdit={(record) => {
             if (record.kind === "request") openRequest(record);
             else if (workflowNodeKinds.has(record.kind)) setResource(record.kind === "workflow" || record.kind === "workflow-step" ? "workflow-creator" : "workflow-tasks");
             else editNode(record);
           }} /></Suspense>
           : resource === "location-map" ? <Suspense fallback={<div className="map-canvas map-overlay">Loading location map…</div>}><LocationMap reload={reload} onEdit={editNode} /></Suspense>
+          : resource === "process-mapper" ? <Suspense fallback={<div className="editor-dialog editor-inline workflow-loading">Loading Process Mapper…</div>}><ProcessMapper metadata={metadata} reload={reload} onNotify={setToast} initialProcessId={processMapperId} canUpdate={canUpdateResource(access, "process-mapper")} /></Suspense>
           : resource === "workflow-creator" ? <Suspense fallback={<div className="editor-dialog editor-inline workflow-loading">Loading Workflow Creator…</div>}><WorkflowCreator metadata={metadata} reload={reload} onNotify={setToast} /></Suspense>
           : resource === "workflow-tasks" ? <Suspense fallback={<div className="editor-dialog editor-inline workflow-loading">Loading Workflow Tasks…</div>}><WorkflowTasks user={user} metadata={metadata} reload={reload} onNotify={setToast} onOpenRequest={openRequest} onRetire={(task) => setRetiring({ type: "node", kind: "task", record: { kind: "task", id: task.id, status: "active", properties: { name: task.step.name } } })} /></Suspense>
           : resource === "access-request" ? <Suspense fallback={<div className="editor-dialog editor-inline workflow-loading">Loading Access Request Form…</div>}><AccessRequestForm key={user.id} user={user} metadata={metadata} reload={reload} onNotify={setToast} openRequest={requestRecord} onOpenRequest={setRequestRecord} /></Suspense>
@@ -949,7 +1009,12 @@ function App() {
         <footer className="page-footer"><span>{chrome.section}</span><span>{chrome.page} · API V1</span></footer>
       </div>
 
-      {editor && <RecordDialog key={`${editor.type}-${editor.kind ?? editor.record?.kind}-${editorRecordKey}`} target={editor} metadata={metadata} onClose={() => setEditor(null)} onSave={saveRecord} />}
+      {editor && <RecordDialog key={`${editor.type}-${editor.kind ?? editor.record?.kind}-${editorRecordKey}`} target={editor} metadata={metadata} onClose={() => setEditor(null)} onSave={saveRecord} onOpenProcessMapper={canViewResource(access, "process-mapper") ? (process) => {
+        setEditor(null);
+        setProcessMapperId(process.id);
+        setResource("process-mapper");
+        setSearch("");
+      } : undefined} />}
       {retiring && <RetireDialog target={retiring} onClose={() => setRetiring(null)} onConfirm={confirmRetirement} />}
     </div>
   );
@@ -1036,7 +1101,7 @@ function StatusPill({ status }: { status: "active" | "retired" }) {
 
 // Incidents are closed out rather than archived, so their retire action reads "Resolve/Retire".
 function retireVerb(kind?: NodeKind) {
-  return kind === "incident" ? "Resolve/Retire" : "Retire";
+  return kind === "incident" || kind === "case" ? "Resolve/Retire" : "Retire";
 }
 
 function RowActions({ status, kind, canEdit = true, canRetire = true, onEdit, onRetire }: { status: "active" | "retired"; kind?: NodeKind; canEdit?: boolean; canRetire?: boolean; onEdit: () => void; onRetire: () => void }) {
@@ -1051,13 +1116,14 @@ function RowActions({ status, kind, canEdit = true, canRetire = true, onEdit, on
 function NodeRow({ record, canEdit, canRetire, onEdit, onRetire }: { record: GraphNode; canEdit?: boolean; canRetire?: boolean; onEdit: () => void; onRetire: () => void }) {
   const properties = record.properties ?? {};
   const displayName = nodeDisplayName(record) ?? (record.kind === "ci" && typeof properties.ciType === "string" ? titleCase(properties.ciType) : "—");
+  const isAutomation = record.kind === "ci" && properties.ciType === "automation";
   const recordType = record.kind === "ci" && typeof properties.ciType === "string" ? `CI · ${titleCase(properties.ciType)}` : record.kind === "request" ? `${titleCase(String(properties.requestType ?? "catalog"))} request` : titleCase(record.kind);
   const summary = recordSummary(record);
   const openState = record.kind === "ci" && properties.ciType === "location" ? locationOpenNow(properties) : null;
   const requestState = record.kind === "request" ? requestStateOf(record) : null;
   return <tr>
     <td><span className="identifier">{record.id}</span></td>
-    <td><div className="primary-value">{displayName}</div><div className="secondary-value">{recordType}{properties.siteId ? ` · ${properties.siteId}` : ""}</div>{openState && <span className={`status-pill open-state ${openState === "open" ? "status-active" : "status-retired"}`}>{openState === "open" ? "Open now" : "Closed now"}</span>}{requestState && <span className={`status-pill open-state ${requestStatePillClass(requestState)}`}>{requestState}</span>}</td>
+    <td><div className="primary-value">{isAutomation && <Settings size={14} strokeWidth={2.2} className="ci-type-icon" aria-label="Automation" />}<span>{displayName}</span></div><div className="secondary-value">{recordType}{properties.siteId ? ` · ${properties.siteId}` : ""}</div>{openState && <span className={`status-pill open-state ${openState === "open" ? "status-active" : "status-retired"}`}>{openState === "open" ? "Open now" : "Closed now"}</span>}{requestState && <span className={`status-pill open-state ${requestStatePillClass(requestState)}`}>{requestState}</span>}</td>
     <td><div className="property-list">{scalarProperties(properties)}</div></td>
     <td><div className="relationship-list">{summary.length === 0
       ? <span className="secondary-value">—</span>
@@ -1078,22 +1144,23 @@ function RelationshipRow({ record, canEdit, canRetire, onEdit, onRetire }: { rec
   </tr>;
 }
 
-function RecordDialog({ target, metadata, inline, onClose, onSave }: {
+function RecordDialog({ target, metadata, inline, onClose, onSave, onOpenProcessMapper }: {
   target: RecordEditorTarget;
   metadata: Metadata | null;
   inline?: boolean; // render as a page panel (the Vendor Request Form view) instead of a modal
   onClose: () => void;
   onSave: (target: RecordEditorTarget, fromId: string, toId: string, properties: Properties, ciIDs: string[], links?: LinkAssignments) => Promise<void>;
+  onOpenProcessMapper?: (process: GraphNode) => void;
 }) {
   const nodeRecord = target.type === "node" ? target.record : undefined;
   const relationshipRecord = target.type === "relationship" ? target.record : undefined;
   const record = target.record;
   const initialProperties = target.record?.properties ?? (target.type === "node" ? target.defaults : undefined) ?? {};
   const knownNames = target.type === "node" ? knownKeysFor(target.kind, initialProperties, metadata) : new Set<string>();
-  const requiresCIs = target.type === "node" && (target.kind === "incident" || target.kind === "change");
+  const requiresCIs = target.type === "node" && (target.kind === "incident" || target.kind === "change" || target.kind === "case");
   const isIdentity = target.type === "node" && target.kind === "identity";
   const generatedID = target.type === "node" && !record;
-  const ciRelationshipKind: RelationshipKind = target.type === "node" && target.kind === "change" ? "changes" : "affects";
+  const ciRelationshipKind: RelationshipKind = target.type === "node" && target.kind === "change" ? "changes" : target.type === "node" && target.kind === "case" ? "case-for" : "affects";
   const [fromId, setFromId] = useState(relationshipRecord?.fromId ?? "");
   const [toId, setToId] = useState(relationshipRecord?.toId ?? "");
   const [relationshipKind, setRelationshipKind] = useState<RelationshipKind>(relationshipRecord?.kind ?? (target.type === "relationship" ? target.kind : undefined) ?? "has-job-code");
@@ -1102,6 +1169,11 @@ function RecordDialog({ target, metadata, inline, onClose, onSave }: {
     // Boolean form fields default unchecked on create so save always sends a value.
     if (target.type === "node" && target.kind === "ci" && typeof known.critical !== "boolean") known.critical = false;
     if (target.type === "node" && target.kind === "incident" && typeof known.nodeDown !== "boolean") known.nodeDown = false;
+    if (target.type === "node" && target.kind === "case" && typeof known.olaEnabled !== "boolean") known.olaEnabled = false;
+    if (target.type === "node" && target.kind === "ci" && (known.ciType === "process-step" || target.defaults?.ciType === "process-step")) {
+      if (typeof known.createsCase !== "boolean") known.createsCase = false;
+      if (typeof known.olaEnabled !== "boolean") known.olaEnabled = false;
+    }
     return known;
   });
   const [attributes, setAttributes] = useState(() => Object.entries(initialProperties).filter(([key]) => !knownNames.has(key)).map(([name, value]) => ({ name, value: String(value), type: typeof value === "boolean" ? "boolean" : typeof value === "number" ? "number" : "text" })));
@@ -1119,7 +1191,10 @@ function RecordDialog({ target, metadata, inline, onClose, onSave }: {
   const [selectedCIIDs, setSelectedCIIDs] = useState<string[]>(() => nodeRecord?.relationships?.filter((relationship) => relationship.kind === ciRelationshipKind).map((relationship) => relationship.toId) ?? (target.type === "node" ? target.ciIds : undefined) ?? []);
   const editing = Boolean(record);
   const isIncident = target.type === "node" && target.kind === "incident";
-  const hasRACI = target.type === "node" && (metadata?.raciKinds ?? raciOwnedKinds).includes(target.kind);
+  const isCase = target.type === "node" && target.kind === "case";
+  // Process-step CIs roll ownership up to the parent Process; no RACI tab.
+  const hasRACI = target.type === "node" && (metadata?.raciKinds ?? raciOwnedKinds).includes(target.kind)
+    && !(target.kind === "ci" && (nodeRecord?.properties?.ciType === "process-step" || target.defaults?.ciType === "process-step" || properties.ciType === "process-step"));
   const [raci, setRACI] = useState<RACIAssignments>(() => hasRACI ? raciFromRecord(nodeRecord) : emptyRACI);
   // Details and RACI live on separate tabs; both stay mounted so nothing typed is lost when switching.
   const [tab, setTab] = useState<"details" | "raci">("details");
@@ -1131,11 +1206,15 @@ function RecordDialog({ target, metadata, inline, onClose, onSave }: {
   const [directAssignees, setDirectAssignees] = useState<string[]>(() => isAccessItem ? linksFromRecord(nodeRecord, [permissionsKind])[permissionsKind] : []);
   // Incident assignment is a single identity or group, stored as an assigned-to link.
   const [assignedTo, setAssignedTo] = useState<string[]>(() => {
-    if (!isIncident) return [];
+    if (!isIncident && !isCase) return [];
     const existing = linksFromRecord(nodeRecord, [incidentAssignmentKind])[incidentAssignmentKind];
     if (existing.length > 0) return existing;
     return target.type === "node" ? target.assignedTo ?? [] : [];
   });
+  // Automation developer is a single identity, stored as developed-by.
+  const [developer, setDeveloper] = useState<string[]>(() => (
+    target.type === "node" && target.kind === "ci" ? linksFromRecord(nodeRecord, [developedByKind])[developedByKind].slice(0, 1) : []
+  ));
   // Group membership is a set of identities, stored as member links from the group.
   const isGroup = target.type === "node" && target.kind === "group";
   const [members, setMembers] = useState<string[]>(() => isGroup ? linksFromRecord(nodeRecord, [memberKind])[memberKind] : []);
@@ -1210,7 +1289,7 @@ function RecordDialog({ target, metadata, inline, onClose, onSave }: {
     return () => { active = false; };
   }, [showsWorkflow, nodeRecord]);
   // Identities and groups back the RACI, assignment, requester, and group-member pickers.
-  const needsPeople = hasRACI || isIncident || isRequest || isGroup;
+  const needsPeople = hasRACI || isIncident || isCase || isRequest || isGroup;
   const [raciOptions, setRACIOptions] = useState<GraphNode[]>([]);
   const [loadingRACI, setLoadingRACI] = useState(false);
   const [raciLoadError, setRACILoadError] = useState("");
@@ -1250,6 +1329,22 @@ function RecordDialog({ target, metadata, inline, onClose, onSave }: {
     return () => { active = false; };
   }, [requiresCIs, isIdentity, isAccessItem]);
   const applicationCIs = availableCIs.filter((ci) => ci.properties?.ciType === "application");
+  const caseStepOptions = availableCIs.filter((ci) => ci.properties?.ciType === "process-step" && ci.properties?.createsCase === true);
+  useEffect(() => {
+    if (!isCase || editing || selectedCIIDs.length !== 1) return;
+    let active = true;
+    getNode("ci", selectedCIIDs[0], false).then((step) => {
+      if (!active) return;
+      setAssignedTo(assignmentFromPerformers(step));
+      setProperties((current) => ({
+        ...current,
+        name: typeof current.name === "string" && current.name.trim() ? current.name : String(step.properties?.name ?? ""),
+        olaEnabled: step.properties?.olaEnabled === true,
+        olaBusinessDays: Number(step.properties?.olaBusinessDays) || (step.properties?.olaEnabled === true ? 5 : 0),
+      }));
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [isCase, editing, selectedCIIDs]);
   useEffect(() => {
     if (!needsPeople) return;
     let active = true;
@@ -1443,15 +1538,30 @@ function RecordDialog({ target, metadata, inline, onClose, onSave }: {
       const location = values.ciType === "location";
       const contract = values.ciType === "contract";
       const application = values.ciType === "application";
+      const processStep = values.ciType === "process-step";
+      const automation = values.ciType === "automation";
       const vendor = values.ciType === "vendor";
-      const described = describedCITypes.has(values.ciType);
+      const described = describedCITypes.has(values.ciType) || processStep || automation;
       if (categorized && typeof values.category !== "string") values.category = metadata?.ciCategories?.[0] ?? categoryOptions[0];
       if (contract && typeof values.contractType !== "string") values.contractType = metadata?.contractTypes?.[0] ?? contractTypeOptions[0];
       if (application && typeof values.hosted !== "string") values.hosted = metadata?.hostingModels?.[0] ?? hostingOptions[0];
+      if (processStep && typeof values.execution !== "string") values.execution = metadata?.executionModels?.[0] ?? executionOptions[0];
+      if (automation && typeof values.environment !== "string") values.environment = metadata?.automationEnvironments?.[0] ?? automationEnvironmentOptions[0];
+      if (automation && typeof values.triggerType !== "string") values.triggerType = metadata?.automationTriggerTypes?.[0] ?? automationTriggerTypeOptions[0];
       if (vendor && typeof values.criticality !== "string") values.criticality = metadata?.criticalities?.[0] ?? criticalityOptions[0];
       values.critical = values.critical === true;
       if (!contract) delete values.contractType;
       if (!application) delete values.hosted;
+      if (!processStep) {
+        delete values.execution;
+        delete values.createsCase;
+        delete values.olaEnabled;
+        delete values.olaBusinessDays;
+      }
+      if (!automation) {
+        delete values.environment;
+        delete values.triggerType;
+      }
       if (!vendor) delete values.criticality;
       if (!categorized) {
         delete values.category;
@@ -1477,8 +1587,19 @@ function RecordDialog({ target, metadata, inline, onClose, onSave }: {
     if (target.type === "node" && target.kind === "incident") {
       values.nodeDown = values.nodeDown === true;
     }
+    if (target.type === "node" && (target.kind === "case" || (target.kind === "ci" && values.ciType === "process-step"))) {
+      if (target.kind === "ci") values.createsCase = values.createsCase === true;
+      values.olaEnabled = values.olaEnabled === true;
+      if (values.olaEnabled) {
+        const days = Number(values.olaBusinessDays);
+        if (!Number.isInteger(days) || days < 1 || days > 365) { setFormError("Enter OLA business days between 1 and 365."); return; }
+        values.olaBusinessDays = days;
+      } else {
+        values.olaBusinessDays = 0;
+      }
+    }
     if (requiresCIs && selectedCIIDs.length === 0) {
-      setFormError("Select at least one active CI before creating this record.");
+      setFormError(isCase ? "Select the process step this case is for." : "Select at least one active CI before creating this record.");
       return;
     }
     if (isRequest) {
@@ -1535,7 +1656,7 @@ function RecordDialog({ target, metadata, inline, onClose, onSave }: {
       : selectedCIIDs;
     // A submitted request's requester is fixed, so only drafts reconcile the drafted-request link.
     // Identity job codes always reconcile (including an empty list when the job is cleared).
-    const links: LinkAssignments | undefined = hasRACI ? { ...raci, ...(isAccessItem ? { [providedByKind]: providedBy, [permissionsKind]: directAssignees } : {}), ...(isBirthright ? { [grantsKind]: [...birthrightRoles, ...birthrightEntitlements], [qualifiesForKind]: qualifyingJobCodes } : {}), ...(isRole ? { [includesKind]: roleIncludes } : {}), ...(isJobCode ? { [qualifiesForKind]: qualifiedBirthrights } : {}) } : isIncident ? { [incidentAssignmentKind]: assignedTo } : isRequest && !requestSubmitted ? { [draftedRequestKind]: requester } : isGroup ? { [memberKind]: members } : picksBirthrights ? { [hasJobCodeKind]: jobCodeIDs } : undefined;
+    const links: LinkAssignments | undefined = hasRACI ? { ...raci, ...(target.type === "node" && target.kind === "ci" ? { [developedByKind]: values.ciType === "automation" ? developer.slice(0, 1) : [] } : {}), ...(isAccessItem ? { [providedByKind]: providedBy, [permissionsKind]: directAssignees } : {}), ...(isBirthright ? { [grantsKind]: [...birthrightRoles, ...birthrightEntitlements], [qualifiesForKind]: qualifyingJobCodes } : {}), ...(isRole ? { [includesKind]: roleIncludes } : {}), ...(isJobCode ? { [qualifiesForKind]: qualifiedBirthrights } : {}) } : isIncident || (isCase && (editing || assignedTo.length > 0)) ? { [incidentAssignmentKind]: assignedTo } : isRequest && !requestSubmitted ? { [draftedRequestKind]: requester } : isGroup ? { [memberKind]: members } : picksBirthrights ? { [hasJobCodeKind]: jobCodeIDs } : undefined;
     void onSave(target.type === "relationship" && !record ? { ...target, kind: relationshipKind } : target, fromId.trim(), toId.trim(), values, linkedCIIDs, links);
   }
 
@@ -1543,10 +1664,16 @@ function RecordDialog({ target, metadata, inline, onClose, onSave }: {
     setAttributes((current) => current.map((attribute, item) => item === index ? { ...attribute, [field]: value } : attribute));
   }
 
+  const isAutomationCI = target.type === "node" && target.kind === "ci" && properties.ciType === "automation";
   const form = <form onSubmit={submit}>
         <div className="dialog-heading">
-          <div><p className="eyebrow">{isRequest ? (editing ? `${requestState.toUpperCase()} REQUEST${nodeRecord ? ` · ${nodeRecord.id}` : ""}` : "NEW REQUEST") : editing ? "UPDATE RECORD" : "NEW RECORD"}</p><h2 id="dialog-title">{isRequest ? "Vendor Request Form" : `${editing ? "Edit" : "Add"} ${target.type === "relationship" ? "relationship" : kindLabel}`}</h2></div>
-          {(!inline || editing) && <button className="close-button" type="button" onClick={onClose} aria-label={inline ? "Start a new request" : "Close"} title={inline ? "Start a new request" : undefined}><X size={17} /></button>}
+          <div><p className="eyebrow">{isRequest ? (editing ? `${requestState.toUpperCase()} REQUEST${nodeRecord ? ` · ${nodeRecord.id}` : ""}` : "NEW REQUEST") : editing ? "UPDATE RECORD" : "NEW RECORD"}</p><h2 id="dialog-title" className={isAutomationCI ? "dialog-title-with-icon" : undefined}>{isAutomationCI && <Settings size={18} strokeWidth={2.2} aria-hidden />}{isRequest ? "Vendor Request Form" : `${editing ? "Edit" : "Add"} ${target.type === "relationship" ? "relationship" : kindLabel}`}</h2></div>
+          <div className="dialog-heading-actions">
+            {editing && target.type === "node" && target.kind === "ci" && nodeRecord?.properties?.ciType === "process" && onOpenProcessMapper && (
+              <button className="button button-quiet icon-button" type="button" onClick={() => onOpenProcessMapper(nodeRecord)}><Waypoints size={14} />Process Mapper</button>
+            )}
+            {(!inline || editing) && <button className="close-button" type="button" onClick={onClose} aria-label={inline ? "Start a new request" : "Close"} title={inline ? "Start a new request" : undefined}><X size={17} /></button>}
+          </div>
         </div>
         {hasRACI && <div className="dialog-tabs" role="tablist" aria-label="Record sections">
           <button type="button" role="tab" id="tab-details" aria-selected={tab === "details"} aria-controls="panel-details" className={tab === "details" ? "active" : ""} onClick={() => setTab("details")}>Details</button>
@@ -1570,8 +1697,12 @@ function RecordDialog({ target, metadata, inline, onClose, onSave }: {
               ? <h3 className="field-group-heading" key={`group-${field.group}`}>{field.group}</h3>
               : null;
             const withHeading = (control: React.ReactNode) => groupHeading ? <Fragment key={field.key}>{groupHeading}{control}</Fragment> : control;
-            const options = field.key === "ciType" ? metadata?.ciTypes ?? field.options : field.key === "category" ? metadata?.ciCategories ?? field.options : field.key === "contractType" ? metadata?.contractTypes ?? field.options : field.key === "hosted" ? metadata?.hostingModels ?? field.options : field.key === "criticality" ? metadata?.criticalities ?? field.options : field.key === "timezone" ? timeZoneChoices(properties.timezone) : field.options;
-            const optionLabel = (option: string) => field.key === "timezone" ? timeZoneLabel(option) : field.key === "state" ? option : field.key === "contractType" ? contractTypeLabels[option] ?? titleCase(option) : titleCase(option);
+            // Union API metadata with the form's known options so a long-lived tab
+            // still offers newly shipped CI types after HMR without a full reload.
+            const options = field.key === "ciType"
+              ? Array.from(new Set([...(metadata?.ciTypes ?? []), ...(field.options ?? [])]))
+              : field.key === "category" ? metadata?.ciCategories ?? field.options : field.key === "contractType" ? metadata?.contractTypes ?? field.options : field.key === "hosted" ? metadata?.hostingModels ?? field.options : field.key === "execution" ? metadata?.executionModels ?? field.options : field.key === "environment" ? metadata?.automationEnvironments ?? field.options : field.key === "triggerType" ? metadata?.automationTriggerTypes ?? field.options : field.key === "criticality" ? metadata?.criticalities ?? field.options : field.key === "timezone" ? timeZoneChoices(properties.timezone) : field.options;
+            const optionLabel = (option: string) => field.key === "timezone" ? timeZoneLabel(option) : field.key === "state" ? option : field.key === "contractType" ? contractTypeLabels[option] ?? titleCase(option) : field.key === "triggerType" ? automationTriggerTypeLabels[option] ?? titleCase(option) : titleCase(option);
             if (isLocation && field.key === "country") {
               return <div className="form-field" key={field.key}><label htmlFor={`field-${field.key}`}>{field.label}</label><input id={`field-${field.key}`} value={fixedCountry} readOnly /></div>;
             }
@@ -1619,6 +1750,13 @@ function RecordDialog({ target, metadata, inline, onClose, onSave }: {
                 })} />
                 <span className="field-hint">Enter 10 digits for a North American number, or start with + for an international number.</span></div>);
             }
+            if (field.number) {
+              return withHeading(<div className="form-field" key={field.key}>
+                <label htmlFor={`field-${field.key}`}>{field.label}</label>
+                <input id={`field-${field.key}`} type="number" min={1} max={365} value={Number(properties[field.key]) || ""} disabled={properties.olaEnabled !== true} onChange={(event) => setProperties((current) => ({ ...current, [field.key]: event.target.value === "" ? 0 : Number(event.target.value) }))} />
+                {field.hint && <span className="field-hint">{field.hint}</span>}
+              </div>);
+            }
             if (field.checkbox) {
               return withHeading(<div className="form-field" key={field.key}>
                 <label className="retired-toggle" htmlFor={`field-${field.key}`}>
@@ -1633,6 +1771,11 @@ function RecordDialog({ target, metadata, inline, onClose, onSave }: {
               ? <select id={`field-${field.key}`} value={String(properties[field.key] ?? options[0])} onChange={(event) => setProperties((current) => ({ ...current, [field.key]: event.target.value }))}>{options.map((option) => <option key={option} value={option}>{optionLabel(option)}</option>)}</select>
               : <input id={`field-${field.key}`} type={inputType} autoComplete="off" value={String(properties[field.key] ?? "")} onChange={(event) => setProperties((current) => ({ ...current, [field.key]: event.target.value }))} />}</div>);
           })}</div>
+          {isAutomationCI && <section className="ci-picker raci-section" aria-labelledby="automation-developer-title">
+            <div className="ci-picker-heading"><div><h3 id="automation-developer-title">Developer</h3></div></div>
+            {loadingRACI ? <p className="field-hint">Loading identities…</p> : raciLoadError ? <p className="form-error" role="alert">{raciLoadError}</p> : raciIdentities.length === 0 && !editing ? <p className="ci-empty">No active identities are available to assign as developer.</p>
+              : <RecordPicker id="automation-developer" label="Developer" hint="One identity who develops this automation. Saved as a developed-by link (developer-of from the identity)." placeholder="Find an identity by name or ID" single options={raciIdentities} selected={developer} onChange={(ids) => setDeveloper(ids.slice(0, 1))} />}
+          </section>}
           {showsWorkflow && <section className="ci-picker request-section" aria-labelledby="workflow-progress-title">
             <div className="ci-picker-heading"><div><h3 id="workflow-progress-title">Workflow progress</h3></div><span className="ci-selection-count">{requestTasks[0]?.workflowName ?? ""}</span></div>
             {requestTasksError ? <p className="form-error" role="alert">{requestTasksError}</p> : requestTasks.length === 0 ? <p className="ci-empty">{requestState === "submitted" ? "No workflow is enabled for this form, so the request is waiting to be fulfilled by hand." : "No workflow tasks recorded for this request."}</p>
@@ -1723,10 +1866,10 @@ function RecordDialog({ target, metadata, inline, onClose, onSave }: {
               {raciRoles.map(({ role, label, hint }) => <RecordPicker key={role} id={`raci-${role}`} label={label} hint={hint} placeholder={role === "accountable" ? "Find an identity by name or ID" : "Find an identity or group by name or ID"} single={role === "accountable"} options={role === "accountable" ? raciIdentities : raciOptions} selected={raci[role]} onChange={(ids) => setRACI((current) => ({ ...current, [role]: ids }))} />)}
             </div>}
           </section></div>}
-          {isIncident && <section className="ci-picker raci-section" aria-labelledby="assignment-title">
+          {(isIncident || isCase) && <section className="ci-picker raci-section" aria-labelledby="assignment-title">
             <div className="ci-picker-heading"><div><h3 id="assignment-title">Assignment</h3></div></div>
             {loadingRACI ? <p className="field-hint">Loading identities and groups…</p> : raciLoadError ? <p className="form-error" role="alert">{raciLoadError}</p> : raciOptions.length === 0 ? <p className="ci-empty">No active identities or groups are available to assign.</p>
-              : <RecordPicker id="incident-assigned-to" label="Assigned to" hint={target.type === "node" && (target.assignedTo?.length ?? 0) > 0 ? "Filled from this CI's Responsible RACI (assignment groups). Change it if this incident should go elsewhere." : "The identity or group working this incident."} placeholder="Find an identity or group by name or ID" options={raciOptions} selected={assignedTo} onChange={setAssignedTo} />}
+              : <RecordPicker id="record-assigned-to" label="Assigned to" hint={isCase ? "Filled from the process step’s Performed by identities and groups. Change it if this case should go elsewhere." : target.type === "node" && (target.assignedTo?.length ?? 0) > 0 ? "Filled from this CI's Responsible RACI (assignment groups). Change it if this incident should go elsewhere." : "The identity or group working this incident."} placeholder="Find an identity or group by name or ID" options={raciOptions} selected={assignedTo} onChange={setAssignedTo} />}
           </section>}
           {isGroup && <section className="ci-picker raci-section" aria-labelledby="members-title">
             <div className="ci-picker-heading"><div><h3 id="members-title">Members</h3></div><span className="ci-selection-count">{members.length} {members.length === 1 ? "member" : "members"}</span></div>
@@ -1734,9 +1877,9 @@ function RecordDialog({ target, metadata, inline, onClose, onSave }: {
               : <RecordPicker id="group-members" label="Identities" hint="Saved as member links from this group (member-of from the identity). Saving creates new memberships and retires removed ones." placeholder="Find an identity by name or ID" options={raciIdentities} selected={members} onChange={setMembers} />}
           </section>}
           {requiresCIs && <section className="ci-picker" aria-labelledby="ci-picker-title">
-            <div className="ci-picker-heading"><div><h3 id="ci-picker-title">Affected configuration items</h3><span className="required-mark">Required</span></div></div>
-            {loadingCIs ? <p className="field-hint">Loading active CIs…</p> : ciLoadError ? <p className="form-error" role="alert">{ciLoadError}</p> : availableCIs.length === 0 && !editing ? <p className="ci-empty">No active CIs are available. Create a CI first.</p>
-              : <RecordPicker id="affected-cis" label="Configuration items" placeholder="Find a CI by name, ID, or type" options={availableCIs} selected={selectedCIIDs} readOnly={editing} onChange={setSelectedCIIDs} />}
+            <div className="ci-picker-heading"><div><h3 id="ci-picker-title">{isCase ? "Process step" : "Affected configuration items"}</h3><span className="required-mark">Required</span></div></div>
+            {loadingCIs ? <p className="field-hint">Loading active CIs…</p> : ciLoadError ? <p className="form-error" role="alert">{ciLoadError}</p> : (isCase ? caseStepOptions.length === 0 : availableCIs.length === 0) && !editing ? <p className="ci-empty">{isCase ? "No process steps allow case creation. Tick Allow case creation on a Process Mapper step and save the map first." : "No active CIs are available. Create a CI first."}</p>
+              : <RecordPicker id="affected-cis" label={isCase ? "Process step" : "Configuration items"} placeholder={isCase ? "Find a process step that creates cases" : "Find a CI by name, ID, or type"} options={isCase ? caseStepOptions : availableCIs} selected={selectedCIIDs} readOnly={editing} single={isCase} onChange={setSelectedCIIDs} />}
             {editing && <p className="field-hint">CI links are managed separately and remain attached while this record is edited.</p>}
           </section>}
         </> : <>
@@ -1780,8 +1923,8 @@ function RetireDialog({ target, onClose, onConfirm }: { target: RetireTarget; on
   const verb = retireVerb(target.type === "node" ? target.kind : undefined);
   const description = target.type === "relationship"
     ? `Relationship ${target.kind} from ${target.record.fromId} to ${target.record.toId} will be marked retired.`
-    : target.kind === "incident"
-      ? `Incident ${target.record.id} will be resolved and marked retired, along with its directly attached relationships.`
+    : target.kind === "incident" || target.kind === "case"
+      ? `${titleCase(target.kind)} ${target.record.id} will be resolved and marked retired, along with its directly attached relationships.`
       : target.kind === "workflow-run"
         ? `Workflow run ${target.record.id} and every task it raised will be marked retired, along with their relationships. The request keeps its own status.`
         : `${titleCase(target.kind)} record ${target.record.id} and its directly attached relationships will be marked retired.`;

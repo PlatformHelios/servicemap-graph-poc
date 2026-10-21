@@ -328,6 +328,63 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/RequestFailed"
+  /api/process-maps/{processId}:
+    parameters:
+      - name: processId
+        in: path
+        required: true
+        description: Identifier of the Process CI to map.
+        schema:
+          type: string
+    get:
+      tags: [ProcessMaps]
+      summary: Get a business process map
+      description: >-
+        Returns the Process CI with ordered process-step CIs (process-step to the
+        first step, then next-in-process), trigger/output action catalogs, and
+        step performers (responsible / uses).
+      operationId: getProcessMap
+      responses:
+        "200":
+          description: Process map assembled from the graph.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProcessMap"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/RequestFailed"
+    put:
+      tags: [ProcessMaps]
+      summary: Save a business process map
+      description: >-
+        Reconciles process-step (Process to first step only), next-in-process between
+        steps, responsible, and uses. Stores triggerActions/outputActions on the Process.
+        Steps without an id create process-step CIs (execution manual or automated).
+        Extra legacy process-step fan-out links are retired; step CIs are left in place.
+      operationId: saveProcessMap
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProcessMap"
+      responses:
+        "200":
+          description: Process map after save.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProcessMap"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/RequestFailed"
   /api/workflows:
     get:
       tags: [Workflows]
@@ -851,11 +908,11 @@ components:
         they can be read and appear on the map, but cannot be created or updated through /api/nodes. DELETE works
         for finished runs (retiring the run and its tasks) and acted-on tasks; active runs, pending tasks, and
         steps are refused.
-      enum: [identity, job-code, birthright, role, entitlement, group, ci, incident, change, event, request, workflow, workflow-step, workflow-run, task]
+      enum: [identity, job-code, birthright, role, entitlement, group, ci, incident, case, change, event, request, workflow, workflow-step, workflow-run, task]
     CIType:
       type: string
       description: Fixed, reviewed catalog. Additions require a software change and redeployment; runtime type creation is not supported.
-      enum: [server, printer, data-connector, application, service, process, function, location, contract, vendor]
+      enum: [server, printer, data-connector, application, service, process, function, process-step, automation, location, contract, vendor]
     CICategory:
       type: string
       description: Business, technology, or security classification. Required when creating service, process, or function CIs.
@@ -868,6 +925,26 @@ components:
       type: string
       description: Whether an application is hosted internally or externally. Required when creating application CIs.
       enum: [internal, external]
+    ExecutionModel:
+      type: string
+      description: Whether a process-step CI is performed manually or automated. Required when creating process-step CIs.
+      enum: [manual, automated]
+    AutomationEnvironment:
+      type: string
+      description: Runtime stage for an automation CI. Required when creating automation CIs.
+      enum: [development, test, production]
+    AutomationTriggerType:
+      type: string
+      description: How an automation CI is started. Required when creating automation CIs. Distinct from process triggerActions.
+      enum: [scheduled, event, manual, api]
+    TriggerAction:
+      type: string
+      description: Kind of event that can start a business process. Stored on Process CIs as triggerActions (not CI links).
+      enum: [email-received, file-delivered, work-item-queued, form-submitted, manual-start, schedule, alert-raised, approval-granted, upstream-completed, status-changed, customer-contact, payment-received]
+    OutputAction:
+      type: string
+      description: Kind of outcome a business process can produce. Stored on Process CIs as outputActions (not CI links).
+      enum: [record-created, record-updated, file-produced, notification-sent, work-item-created, decision-recorded, access-granted, change-applied, process-started, queue-cleared, artifact-published, payment-issued]
     Criticality:
       type: string
       description: How important a vendor is to the business. Required when creating vendor CIs.
@@ -975,6 +1052,80 @@ components:
           minimum: 1
           maximum: 365
           description: Business days allowed to complete the task when olaEnabled is true.
+    ProcessMap:
+      type: object
+      required: [processId, steps]
+      properties:
+        processId:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        triggerActions:
+          type: array
+          description: Closed catalog of events that can start this process (process-level only).
+          items:
+            $ref: "#/components/schemas/TriggerAction"
+        triggerDescription:
+          type: string
+          description: Short workshop note for what kicks the process off.
+        outputActions:
+          type: array
+          description: Closed catalog of outcomes this process can produce (process-level only).
+          items:
+            $ref: "#/components/schemas/OutputAction"
+        outputDescription:
+          type: string
+          description: Short workshop note for what the process produces.
+        steps:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProcessMapStep"
+    ProcessMapStep:
+      type: object
+      required: [name, execution, order]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        execution:
+          $ref: "#/components/schemas/ExecutionModel"
+        createsCase:
+          type: boolean
+          description: When true, this step allows a Case to be created (via API or UI); it does not create a case automatically. Raised cases are assigned to the step's performers.
+        olaEnabled:
+          type: boolean
+          description: Whether this step is measured against an OLA in business days.
+        olaBusinessDays:
+          type: integer
+          minimum: 1
+          maximum: 365
+        order:
+          type: integer
+        x:
+          type: number
+        y:
+          type: number
+        performers:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProcessMapPerformer"
+    ProcessMapPerformer:
+      type: object
+      required: [kind, id]
+      properties:
+        kind:
+          type: string
+          enum: [identity, group, application, automation]
+          description: Applications and automations are stored as uses links; identities and groups as responsible.
+        id:
+          type: string
+        name:
+          type: string
     WorkflowDefinition:
       type: object
       required: [name, requestType, steps]
@@ -1306,19 +1457,25 @@ components:
       example: 08:00-17:00
     RelationshipKind:
       type: string
-      enum: [has-job-code, work-location, member, drafted-request, form-submitted, requested-for, requests-access, has-step, next-step, step-assigned-to, run-for, instance-of, task-for, task-step, task-item, task-assigned-to, acted-by, fulfilled-by, qualifies-for, grants, includes, has-role, entitled-by, permissions, affects, changes, assigned-to, observed-on, depends-on, hosts, uses, governs, provides, accountable, responsible, consulted, informed]
+      enum: [has-job-code, work-location, member, drafted-request, form-submitted, requested-for, requests-access, has-step, next-step, step-assigned-to, run-for, instance-of, task-for, task-step, task-item, task-assigned-to, acted-by, fulfilled-by, qualifies-for, grants, includes, has-role, entitled-by, permissions, affects, changes, assigned-to, case-for, observed-on, depends-on, hosts, uses, governs, provides, process-step, next-in-process, triggered-by, produces, accountable, responsible, consulted, informed, developed-by]
       description: >-
         Canonical lowercase kebab-case forward relationship names. The API also accepts uppercase underscore aliases.
         Every relationship is stored once in its forward direction; GET /api/meta returns the inverse label for each
         kind (for example grants / granted-by, hosts / hosted-by, uses / used-by, governs / governed-by,
         provides / provided-by, member / member-of for Group to Identity) so clients can present the edge from
-        either endpoint's perspective. governs must
+        either endpoint's perspective. Business process maps use process-step / step-in (Process CI to
+        its first process-step CI only), next-in-process / previous-in-process between process-step CIs
+        (canvas x/y live on each step CI), triggered-by / triggers (Process to an identity, group, or
+        application/process/function/service CI), and produces / produced-by (Process, Function, or
+        process-step CI to any CI). These are distinct from catalog workflow
+        has-step / next-step. governs must
         start from a contract CI; provides connects service and function CIs with one another, or a vendor CI with the application, server, or printer
         CIs it supplies (see ciTypeRules in GET /api/meta); work-location
         (Identity to CI, inverse work-location-for) must end on a location CI. RACI ownership of a CI, job code,
         birthright, role, or entitlement (see fromKinds in GET /api/meta) is recorded
         with accountable / accountable-for (to one Identity), and responsible / responsible-for, consulted /
         consulted-on, informed / informed-of (to Identity or Group; see toKinds in GET /api/meta).
+        An automation CI names its developer with developed-by / developer-of (to one Identity).
         Access: has-role / role-for ties an application CI to its roles, and entitled-by / entitlement-for ties it
         to its entitlements (a role or entitlement is for one application);
         permissions / permissioned-by records a role or entitlement granted to an Identity directly, outside a
@@ -1326,7 +1483,8 @@ components:
         An access request names its subject with requested-for / subject-of (Request to Identity) and its items
         with requests-access / requested-on (Request to Role or Entitlement; note, decision, decidedAt, decidedBy,
         fulfilledAt on the edge); each task of its run points at the item it is about with task-item / item-task.
-        assigned-to / assignee-of records which Identity or Group is working an Incident. Catalog requests are tied
+        assigned-to / assignee-of records which Identity or Group is working an Incident or a Case.
+        case-for / has-case ties a Case to the process-step CI that raised it. Catalog requests are tied
         to their requester with drafted-request / drafted-request-for (Identity to Request) while in draft; submitting
         the request retires that link and creates form-submitted / submitted-by from the same Identity.
         Workflow definitions use has-step / step-of (Workflow to WorkflowStep), next-step / previous-step between
@@ -1351,6 +1509,9 @@ components:
         hosted:
           $ref: "#/components/schemas/HostingModel"
           description: Required for application CIs; fixed enum values are returned by GET /api/meta.
+        execution:
+          $ref: "#/components/schemas/ExecutionModel"
+          description: Required for process-step CIs; fixed enum values are returned by GET /api/meta.
         criticality:
           $ref: "#/components/schemas/Criticality"
           description: Required for vendor CIs and for vendor requests at submission; fixed enum values are returned by GET /api/meta.
@@ -1525,7 +1686,7 @@ components:
           $ref: "#/components/schemas/Properties"
     Metadata:
       type: object
-      required: [nodeKinds, ciTypes, ciCategories, contractTypes, hostingModels, criticalities, requestTypes, requestStates, relationships]
+      required: [nodeKinds, ciTypes, ciCategories, contractTypes, hostingModels, executionModels, automationEnvironments, automationTriggerTypes, triggerActions, outputActions, criticalities, requestTypes, requestStates, relationships]
       properties:
         nodeKinds:
           type: array
@@ -1547,6 +1708,26 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/HostingModel"
+        executionModels:
+          type: array
+          items:
+            $ref: "#/components/schemas/ExecutionModel"
+        automationEnvironments:
+          type: array
+          items:
+            $ref: "#/components/schemas/AutomationEnvironment"
+        automationTriggerTypes:
+          type: array
+          items:
+            $ref: "#/components/schemas/AutomationTriggerType"
+        triggerActions:
+          type: array
+          items:
+            $ref: "#/components/schemas/TriggerAction"
+        outputActions:
+          type: array
+          items:
+            $ref: "#/components/schemas/OutputAction"
         criticalities:
           type: array
           items:
