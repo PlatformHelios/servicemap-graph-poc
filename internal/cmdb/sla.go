@@ -19,16 +19,16 @@ type Holiday struct {
 // AgreementClock is the SLA or OLA progress for a request or task, counted in
 // Monday–Friday business days and skipping marked holidays.
 type AgreementClock struct {
-	Kind           string  `json:"kind"` // sla or ola
-	Enabled        bool    `json:"enabled"`
-	BusinessDays   int     `json:"businessDays,omitempty"`
-	StartedAt      string  `json:"startedAt,omitempty"`
-	DueAt          string  `json:"dueAt,omitempty"`   // last included business day, YYYY-MM-DD
-	ElapsedDays    int     `json:"elapsedDays"`
-	RemainingDays  int     `json:"remainingDays"`
-	Progress       float64 `json:"progress"` // 0–1 of business time used, in 8-hour steps; may exceed 1 when overdue
-	Status         string  `json:"status"`   // none, on-track, due-today, overdue, met, missed
-	Overdue        bool    `json:"overdue"`
+	Kind          string  `json:"kind"` // sla or ola
+	Enabled       bool    `json:"enabled"`
+	BusinessDays  int     `json:"businessDays,omitempty"`
+	StartedAt     string  `json:"startedAt,omitempty"`
+	DueAt         string  `json:"dueAt,omitempty"` // last included business day, YYYY-MM-DD
+	ElapsedDays   int     `json:"elapsedDays"`
+	RemainingDays int     `json:"remainingDays"`
+	Progress      float64 `json:"progress"` // 0–1 of business time used, in 8-hour steps; may exceed 1 when overdue
+	Status        string  `json:"status"`   // none, on-track, due-today, overdue, met, missed
+	Overdue       bool    `json:"overdue"`
 }
 
 const (
@@ -269,6 +269,18 @@ func slaClockForRequest(request Node, now time.Time, holidays []Holiday) *Agreem
 	started, _ := request.Properties["submittedAt"].(string)
 	finished, _ := request.Properties["fulfilledAt"].(string)
 	clock := agreementClock("sla", true, days, started, finished, now, holidays)
+	return &clock
+}
+
+func olaClockForCase(node Node, now time.Time, holidays []Holiday) *AgreementClock {
+	enabled := boolProperty(node.Properties, "olaEnabled")
+	days, _ := intProperty(node.Properties, "olaBusinessDays")
+	started, _ := node.Properties["openedAt"].(string)
+	finished := ""
+	if node.Status == "retired" {
+		finished = node.RetiredAt
+	}
+	clock := agreementClock("ola", enabled && days > 0, days, started, finished, now, holidays)
 	return &clock
 }
 

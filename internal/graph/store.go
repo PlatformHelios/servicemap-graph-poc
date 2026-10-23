@@ -324,9 +324,10 @@ func (s *Store) CreateGeneratedNode(ctx context.Context, kind cmdb.NodeKind, pro
 
 func (s *Store) createNodeWithID(ctx context.Context, kind cmdb.NodeKind, label, key, id string, properties map[string]any, ciIDs []string) (*cmdb.Node, error) {
 	linkedKind, linkedCIType, linkable := cmdb.LinkedCIRelationship(kind)
+	status := cmdb.NodeStatusFromContext(ctx)
 	if !linkable || len(ciIDs) == 0 {
-		query := fmt.Sprintf("CREATE (node:%s {%s: $id, status: 'active'}) SET node += $properties RETURN node AS node", label, key)
-		records, err := s.execute(ctx, true, query, map[string]any{"id": id, "properties": properties})
+		query := fmt.Sprintf("CREATE (node:%s {%s: $id, status: $status}) SET node += $properties RETURN node AS node", label, key)
+		records, err := s.execute(ctx, true, query, map[string]any{"id": id, "properties": properties, "status": status})
 		if err != nil {
 			return nil, fmt.Errorf("create %s with generated ID: %w", kind, err)
 		}
@@ -340,12 +341,12 @@ func (s *Store) createNodeWithID(ctx context.Context, kind cmdb.NodeKind, label,
 		return nil, err
 	}
 	relationshipType := linkedDefinition.TypeName
-	query := fmt.Sprintf("WITH $ciIDs AS ciIDs OPTIONAL MATCH (ci:CI) WHERE ci.id IN ciIDs WITH ciIDs, collect(ci) AS cis WHERE size(cis) = size(ciIDs) AND all(ci IN cis WHERE ci.status = 'active') AND ($ciType IS NULL OR all(ci IN cis WHERE ci.ciType = $ciType)) CREATE (node:%s {%s: $id, status: 'active'}) SET node += $properties WITH node, cis FOREACH (ci IN cis | CREATE (node)-[:%s {status: 'active'}]->(ci)) WITH node OPTIONAL MATCH (node)-[relationship:%s]->(ci:CI) RETURN node AS node, collect(CASE WHEN relationship IS NULL THEN null ELSE %s END) AS relationships", label, key, relationshipType, relationshipType, listedRelationshipMap)
+	query := fmt.Sprintf("WITH $ciIDs AS ciIDs OPTIONAL MATCH (ci:CI) WHERE ci.id IN ciIDs WITH ciIDs, collect(ci) AS cis WHERE size(cis) = size(ciIDs) AND all(ci IN cis WHERE ci.status IN ['active', 'draft']) AND ($ciType IS NULL OR all(ci IN cis WHERE ci.ciType = $ciType)) CREATE (node:%s {%s: $id, status: $status}) SET node += $properties WITH node, cis FOREACH (ci IN cis | CREATE (node)-[:%s {status: 'active'}]->(ci)) WITH node OPTIONAL MATCH (node)-[relationship:%s]->(ci:CI) RETURN node AS node, collect(CASE WHEN relationship IS NULL THEN null ELSE %s END) AS relationships", label, key, relationshipType, relationshipType, listedRelationshipMap)
 	var ciTypeParam any
 	if linkedCIType != "" {
 		ciTypeParam = string(linkedCIType)
 	}
-	params := map[string]any{"id": id, "ciIDs": ciIDs, "properties": properties, "ciType": ciTypeParam}
+	params := map[string]any{"id": id, "ciIDs": ciIDs, "properties": properties, "ciType": ciTypeParam, "status": status}
 	records, err := s.execute(ctx, true, query, params)
 	if err != nil {
 		return nil, fmt.Errorf("create %s with generated ID: %w", kind, err)
@@ -369,7 +370,7 @@ func (s *Store) GetNode(ctx context.Context, kind cmdb.NodeKind, id string, incl
 	}
 	filter := ""
 	if !includeRetired {
-		filter = " WHERE node.status = 'active'"
+		filter = " WHERE node.status IN ['active', 'draft']"
 	}
 	query := fmt.Sprintf("MATCH (node:%s {%s: $id})%s OPTIONAL MATCH (node)-[relationship:%s]-(other) WITH node, collect(CASE WHEN relationship IS NULL THEN null ELSE %s END) AS relationships RETURN node AS node, relationships", label, key, filter, relationshipTypes(includeRetired), listedRelationshipMap)
 	records, err := s.execute(ctx, false, query, map[string]any{"id": id})
@@ -399,7 +400,14 @@ func nodeListSource(label, key string, options cmdb.ListOptions) (string, map[st
 		params["involvedId"] = options.InvolvedID
 	}
 	conditions := make([]string, 0, 3)
-	if !options.IncludeRetired {
+	switch {
+	case options.IncludeRetired && options.IncludeDraft:
+		// Every status.
+	case options.IncludeRetired:
+		conditions = append(conditions, "node.status IN ['active', 'retired']")
+	case options.IncludeDraft:
+		conditions = append(conditions, "node.status IN ['active', 'draft']")
+	default:
 		conditions = append(conditions, "node.status = 'active'")
 	}
 	if options.RequestType != "" {
@@ -491,7 +499,7 @@ func (s *Store) UpdateNode(ctx context.Context, kind cmdb.NodeKind, id string, p
 	if err != nil {
 		return nil, err
 	}
-	query := fmt.Sprintf("MATCH (node:%s {%s: $id}) WHERE node.status = 'active' SET node += $properties RETURN node AS node", label, key)
+	query := fmt.Sprintf("MATCH (node:%s {%s: $id}) WHERE node.status IN ['active', 'draft'] SET node += $properties RETURN node AS node", label, key)
 	records, err := s.execute(ctx, true, query, map[string]any{"id": id, "properties": properties})
 	if err != nil {
 		return nil, fmt.Errorf("update %s: %w", kind, err)
@@ -725,7 +733,7 @@ func (s *Store) CreateRelationship(ctx context.Context, kind cmdb.RelationshipKi
 	}
 	// Live edges are always active (retired ones live under the retired type),
 	// so MERGE either finds the existing live link or creates it.
-	query := fmt.Sprintf("MATCH %s, %s%s MERGE (source)-[relationship:%s]->(target) ON CREATE SET relationship.status = 'active' SET relationship += $properties RETURN properties(relationship) AS properties", endpoints.source.pattern, endpoints.target.pattern, whereClause(endpoints.source.filter, endpoints.target.filter, "source.status = 'active' AND target.status = 'active'"+typeFilter), definition.TypeName)
+	query := fmt.Sprintf("MATCH %s, %s%s MERGE (source)-[relationship:%s]->(target) ON CREATE SET relationship.status = 'active' SET relationship += $properties RETURN properties(relationship) AS properties", endpoints.source.pattern, endpoints.target.pattern, whereClause(endpoints.source.filter, endpoints.target.filter, "source.status IN ['active', 'draft'] AND target.status IN ['active', 'draft']"+typeFilter), definition.TypeName)
 	records, err := s.execute(ctx, true, query, params)
 	if err != nil {
 		return nil, fmt.Errorf("create %s relationship: %w", kind, err)
@@ -1002,4 +1010,148 @@ func decodeRelationshipProperties(kind cmdb.RelationshipKind, fromID, toID strin
 func stringProperty(properties map[string]any, key string) string {
 	value, _ := properties[key].(string)
 	return value
+}
+
+func (s *Store) SetNodeStatus(ctx context.Context, kind cmdb.NodeKind, id, status string) error {
+	if status != "active" {
+		return fmt.Errorf("%w: status can only be set to active", cmdb.ErrInvalid)
+	}
+	label, key, err := cmdb.NodeDefinition(kind)
+	if err != nil {
+		return err
+	}
+	records, err := s.execute(ctx, true, fmt.Sprintf("MATCH (node:%s {%s: $id}) WHERE node.status = 'draft' SET node.status = 'active' REMOVE node.retiredAt RETURN node.id AS id", label, key), map[string]any{"id": id})
+	if err != nil {
+		return fmt.Errorf("publish %s: %w", kind, err)
+	}
+	if len(records) == 0 {
+		return cmdb.ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) DeleteDraftNode(ctx context.Context, kind cmdb.NodeKind, id string) error {
+	label, key, err := cmdb.NodeDefinition(kind)
+	if err != nil {
+		return err
+	}
+	records, err := s.execute(ctx, true, fmt.Sprintf("MATCH (node:%s {%s: $id}) WHERE node.status = 'draft' WITH node, node.id AS id DETACH DELETE node RETURN id", label, key), map[string]any{"id": id})
+	if err != nil {
+		return fmt.Errorf("delete draft %s: %w", kind, err)
+	}
+	if len(records) == 0 {
+		return cmdb.ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) ListDraftPackages(ctx context.Context) ([]cmdb.DraftPackage, error) {
+	records, err := s.execute(ctx, false, `
+MATCH (process:CI)
+WHERE process.ciType = 'process' AND process.status IN ['draft', 'active']
+OPTIONAL MATCH (process)-[:PROCESS_STEP|TRIGGERED_BY|PRODUCES]->(direct)
+OPTIONAL MATCH (process)-[:PROCESS_STEP]->()-[:NEXT_IN_PROCESS*0..40]->(step)
+OPTIONAL MATCH (step)-[:RESPONSIBLE|USES]->(performer)
+WITH process, collect(DISTINCT direct) + collect(DISTINCT step) + collect(DISTINCT performer) AS linked
+WITH process, [n IN linked WHERE n IS NOT NULL AND n.status = 'draft' AND n <> process] AS drafts
+WHERE process.status = 'draft' OR size(drafts) > 0
+RETURN process.id AS processId, coalesce(process.name, process.id) AS name, process.status AS processStatus,
+  [process] + drafts AS nodes
+ORDER BY name`, nil)
+	if err != nil {
+		return nil, fmt.Errorf("list draft packages: %w", err)
+	}
+	packages := make([]cmdb.DraftPackage, 0, len(records))
+	claimed := map[string]bool{}
+	for _, record := range records {
+		processID, _ := record.Get("processId")
+		name, _ := record.Get("name")
+		processStatus, _ := record.Get("processStatus")
+		rawNodes, _ := record.Get("nodes")
+		objects := draftObjects(rawNodes)
+		if fmt.Sprint(processStatus) != "draft" {
+			filtered := objects[:0]
+			for _, object := range objects {
+				if object.ID != fmt.Sprint(processID) {
+					filtered = append(filtered, object)
+				}
+			}
+			objects = filtered
+		}
+		if len(objects) == 0 {
+			continue
+		}
+		for _, object := range objects {
+			claimed[object.ID] = true
+		}
+		packages = append(packages, cmdb.DraftPackage{ProcessID: fmt.Sprint(processID), Name: fmt.Sprint(name), Objects: objects})
+	}
+	looseRecords, err := s.execute(ctx, false, `
+MATCH (node)
+WHERE node.status = 'draft' AND NOT node:Request
+RETURN labels(node) AS labels, coalesce(node.id, node.code) AS id, coalesce(node.name, '') AS name, coalesce(node.ciType, '') AS ciType
+ORDER BY id`, nil)
+	if err != nil {
+		return nil, fmt.Errorf("list loose drafts: %w", err)
+	}
+	loose := []cmdb.DraftObject{}
+	for _, record := range looseRecords {
+		id, _ := record.Get("id")
+		objectID := fmt.Sprint(id)
+		if objectID == "" || claimed[objectID] {
+			continue
+		}
+		name, _ := record.Get("name")
+		ciType, _ := record.Get("ciType")
+		labels, _ := record.Get("labels")
+		loose = append(loose, cmdb.DraftObject{Kind: kindFromLabels(labels), ID: objectID, Name: fmt.Sprint(name), CIType: fmt.Sprint(ciType), Status: "draft"})
+	}
+	if len(loose) > 0 {
+		packages = append(packages, cmdb.DraftPackage{Name: "Not in a map yet", Objects: loose})
+	}
+	return packages, nil
+}
+
+func draftObjects(value any) []cmdb.DraftObject {
+	nodes, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+	objects := make([]cmdb.DraftObject, 0, len(nodes))
+	seen := map[string]bool{}
+	for _, item := range nodes {
+		node, ok := item.(neo4j.Node)
+		if !ok {
+			continue
+		}
+		id := fmt.Sprint(node.Props["id"])
+		if id == "" || id == "<nil>" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		name, _ := node.Props["name"].(string)
+		ciType, _ := node.Props["ciType"].(string)
+		objects = append(objects, cmdb.DraftObject{
+			Kind:   kindFromLabels(node.Labels),
+			ID:     id,
+			Name:   name,
+			CIType: ciType,
+			Status: "draft",
+		})
+	}
+	return objects
+}
+
+func kindFromLabels(value any) string {
+	switch labels := value.(type) {
+	case []string:
+		if len(labels) > 0 {
+			return strings.ToLower(labels[0])
+		}
+	case []any:
+		if len(labels) > 0 {
+			return strings.ToLower(fmt.Sprint(labels[0]))
+		}
+	}
+	return "ci"
 }

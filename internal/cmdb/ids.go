@@ -24,8 +24,10 @@ func FormatGeneratedID(kind NodeKind, sequence int) (string, error) {
 // a positive Limit returns one page and the total count alongside it.
 type ListOptions struct {
 	IncludeRetired bool
-	Limit          int
-	Offset         int
+	// IncludeDraft adds unpublished process-map records to an otherwise active list.
+	IncludeDraft bool
+	Limit        int
+	Offset       int
 	// Query is a case-insensitive substring matched against the record's id and
 	// property values.
 	Query string

@@ -363,7 +363,8 @@ paths:
       summary: Save a business process map
       description: >-
         Reconciles process-step (Process to first step only), next-in-process between
-        steps, responsible, and uses. Stores triggerActions/outputActions on the Process.
+        steps, depends-on from each step to Process Start or an earlier step, responsible, and uses. Stores triggerActions/outputActions on the Process
+        and triggered-by / produces links for the selected trigger and output CIs.
         Steps without an id create process-step CIs (execution manual or automated).
         Extra legacy process-step fan-out links are retired; step CIs are left in place.
       operationId: saveProcessMap
@@ -1280,6 +1281,11 @@ components:
         triggerDescription:
           type: string
           description: Short workshop note for what kicks the process off.
+        triggers:
+          type: array
+          description: Configuration items that start this process, stored as triggered-by. Allowed CI types are application, process, function, and service.
+          items:
+            $ref: "#/components/schemas/ProcessMapRef"
         outputActions:
           type: array
           description: Closed catalog of outcomes this process can produce (process-level only).
@@ -1288,6 +1294,11 @@ components:
         outputDescription:
           type: string
           description: Short workshop note for what the process produces.
+        outputs:
+          type: array
+          description: Configuration items this process produces, stored as produces.
+          items:
+            $ref: "#/components/schemas/ProcessMapRef"
         steps:
           type: array
           items:
@@ -1324,6 +1335,44 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ProcessMapPerformer"
+        dependsOn:
+          type: array
+          description: >-
+            What this step waits on before it can start. process-start waits on the process
+            (steps that only have this run concurrently from the start). step waits on an
+            earlier step in this map. Several entries mean the step waits for all of them.
+            Stored as depends-on (inverse depended-on-by).
+          items:
+            $ref: "#/components/schemas/ProcessMapDependency"
+    ProcessMapDependency:
+      type: object
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          enum: [process-start, step]
+        id:
+          type: string
+          description: Target step CI id when kind is step. Omit for a step created in the same save and send order instead.
+        order:
+          type: integer
+          minimum: 1
+          description: 1-based position of the earlier step this step waits on.
+        name:
+          type: string
+          readOnly: true
+    ProcessMapRef:
+      type: object
+      required: [kind, id]
+      properties:
+        kind:
+          type: string
+          enum: [ci]
+        id:
+          type: string
+        name:
+          type: string
+          readOnly: true
     ProcessMapPerformer:
       type: object
       required: [kind, id]
@@ -2049,6 +2098,9 @@ components:
           description: Directly attached supported relationships; omitted when empty.
           items:
             $ref: "#/components/schemas/Relationship"
+        ola:
+          description: OLA progress for a case. Present when the case is measured against an operational level agreement. The ring fills as business time is used; openedAt is kept on the record and is not returned as an editable property.
+          $ref: "#/components/schemas/AgreementClock"
     Relationship:
       type: object
       required: [kind, fromId, toId, status]

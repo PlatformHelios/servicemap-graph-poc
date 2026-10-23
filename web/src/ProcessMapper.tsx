@@ -23,7 +23,9 @@ import type {
   Metadata,
   OutputAction,
   ProcessMap,
+  ProcessMapDependency,
   ProcessMapPerformer,
+  ProcessMapRef,
   ProcessMapStep,
   TriggerAction,
 } from "./types";
@@ -43,6 +45,7 @@ const fallbackOutputActions: OutputAction[] = [
   "record-created", "record-updated", "file-produced", "notification-sent", "work-item-created", "decision-recorded",
   "access-granted", "change-applied", "process-started", "queue-cleared", "artifact-published", "payment-issued",
 ];
+const triggerCITypes = new Set(["application", "process", "function", "service"]);
 
 function ActionChecklist({
   id,
@@ -116,9 +119,9 @@ function ProcessSearch({
     }
     let active = true;
     setSearching(true);
-    getNodePage("ci", { q: debounced, limit: 40, includeRetired: false }).then((page) => {
+    getNodePage("ci", { q: debounced, limit: 40, includeRetired: false, includeDraft: true }).then((page) => {
       if (!active) return;
-      setMatches(page.items.filter((node) => node.properties?.ciType === "process" && node.status === "active").slice(0, processSearchLimit));
+      setMatches(page.items.filter((node) => node.properties?.ciType === "process" && (node.status === "active" || node.status === "draft")).slice(0, processSearchLimit));
     }).catch(() => {
       if (active) setMatches([]);
     }).finally(() => {
@@ -179,7 +182,7 @@ function ProcessSearch({
                   : matches.map((node) => (
                     <li key={node.id} role="option" aria-selected={false}>
                       <button type="button" className="raci-match" onMouseDown={(event) => event.preventDefault()} onClick={() => pick(node)}>
-                        <strong>{nodeDisplayName(node) ?? node.id}</strong><small>{pickerSubtitle(node)}</small>
+                        <strong>{nodeDisplayName(node) ?? node.id}</strong><small>{pickerSubtitle(node)}{node.status === "draft" ? " · draft" : ""}</small>
                       </button>
                     </li>
                   ))}
@@ -193,7 +196,49 @@ function ProcessSearch({
 
 type Stage = "process" | "start" | "steps" | "outputs";
 
-type StepDraft = ProcessMapStep & { uiKey: number };
+type StepDependency = { kind: "process-start" } | { kind: "step"; uiKey: number };
+
+type StepDraft = Omit<ProcessMapStep, "dependsOn"> & { uiKey: number; dependsOn: StepDependency[] };
+
+function linearDependencies(steps: StepDraft[]): StepDraft[] {
+  if (steps.length === 0 || steps.some((step) => step.dependsOn.length > 0)) return steps;
+  return steps.map((step, index) => ({
+    ...step,
+    dependsOn: index === 0
+      ? [{ kind: "process-start" }]
+      : [{ kind: "step", uiKey: steps[index - 1].uiKey }],
+  }));
+}
+
+function keepEarlierDependencies(steps: StepDraft[]): StepDraft[] {
+  const indexOf = new Map(steps.map((step, index) => [step.uiKey, index]));
+  return steps.map((step, index) => ({
+    ...step,
+    order: index + 1,
+    dependsOn: step.dependsOn.filter((dep) => {
+      if (dep.kind === "process-start") return true;
+      const depIndex = indexOf.get(dep.uiKey);
+      return depIndex !== undefined && depIndex < index;
+    }),
+  }));
+}
+
+function dependenciesFromMap(steps: StepDraft[], source: ProcessMapStep[]): StepDraft[] {
+  const byId = new Map(steps.filter((step) => step.id).map((step) => [step.id as string, step.uiKey]));
+  const mapped = steps.map((step, index) => {
+    const dependsOn: StepDependency[] = [];
+    for (const dep of source[index]?.dependsOn ?? []) {
+      if (dep.kind === "process-start") {
+        dependsOn.push({ kind: "process-start" });
+        continue;
+      }
+      const uiKey = dep.id ? byId.get(dep.id) : steps.find((item) => item.order === dep.order)?.uiKey;
+      if (uiKey !== undefined && uiKey !== step.uiKey) dependsOn.push({ kind: "step", uiKey });
+    }
+    return { ...step, dependsOn };
+  });
+  return linearDependencies(mapped);
+}
 
 const guidance: Record<Stage, { title: string; body: string }> = {
   process: {
@@ -202,15 +247,15 @@ const guidance: Record<Stage, { title: string; body: string }> = {
   },
   start: {
     title: "What kicks this off?",
-    body: "Pick one or more trigger actions from the catalog (email received, form submitted, schedule, and so on), then add a short note in workshop language. Triggers are events, not CI links.",
+    body: "Pick the trigger actions, then the configuration items that start this process (an application, process, function, or service). Use + if that CI does not exist yet.",
   },
   steps: {
     title: "Map the steps",
-    body: "Add ordered steps left to right. Each step is stored as a Process Step CI (manual or automated). Name it in business language, say who or what performs it, then reorder as needed.",
+    body: "Add ordered steps left to right. Each step is stored as a Process Step CI (manual or automated). Name it, say who performs it, and choose what it depends on. Process Start runs steps together from the beginning. Depending on an earlier step makes this step wait for that work.",
   },
   outputs: {
     title: "What does this produce?",
-    body: "Pick outcome actions from the catalog (record created, notification sent, and so on), then note them in plain language. Outputs are process-level events, not CI links.",
+    body: "Pick the outcome actions, then the configuration items this process produces. Use + if that CI does not exist yet.",
   },
 };
 
@@ -225,6 +270,7 @@ function newStep(): StepDraft {
     olaEnabled: false,
     order: 1,
     performers: [],
+    dependsOn: [],
   };
 }
 
@@ -233,8 +279,10 @@ function draftFromMap(map: ProcessMap): {
   description: string;
   triggerDescription: string;
   triggerActions: TriggerAction[];
+  triggerIds: string[];
   outputDescription: string;
   outputActions: OutputAction[];
+  outputIds: string[];
   steps: StepDraft[];
 } {
   return {
@@ -242,18 +290,21 @@ function draftFromMap(map: ProcessMap): {
     description: map.description ?? "",
     triggerDescription: map.triggerDescription ?? "",
     triggerActions: (map.triggerActions ?? []) as TriggerAction[],
+    triggerIds: (map.triggers ?? []).map((item) => item.id),
     outputDescription: map.outputDescription ?? "",
     outputActions: (map.outputActions ?? []) as OutputAction[],
-    steps: (map.steps ?? []).map((step, index) => ({
+    outputIds: (map.outputs ?? []).map((item) => item.id),
+    steps: dependenciesFromMap((map.steps ?? []).map((step, index) => ({
       ...step,
       uiKey: nextStepKey++,
       order: step.order || index + 1,
       performers: step.performers ?? [],
+      dependsOn: [],
       execution: step.execution === "automated" ? "automated" : "manual",
       createsCase: Boolean(step.createsCase),
       olaEnabled: Boolean(step.olaEnabled),
       olaBusinessDays: step.olaBusinessDays,
-    })),
+    })), map.steps ?? []),
   };
 }
 
@@ -282,12 +333,22 @@ export default function ProcessMapper({
   onNotify,
   initialProcessId,
   canUpdate,
+  canCreateCI,
+  canCreateGroup,
+  onCreateRecord,
+  createdRecord,
+  onCreatedRecordHandled,
 }: {
   metadata: Metadata | null;
   reload: number;
   onNotify: (message: string) => void;
   initialProcessId?: string | null;
   canUpdate: boolean;
+  canCreateCI?: boolean;
+  canCreateGroup?: boolean;
+  onCreateRecord?: (kind: "ci" | "group", defaults?: { ciType?: string }) => void;
+  createdRecord?: GraphNode | null;
+  onCreatedRecordHandled?: () => void;
 }) {
   const [stage, setStage] = useState<Stage>("process");
   const [cis, setCIs] = useState<GraphNode[]>([]);
@@ -299,8 +360,11 @@ export default function ProcessMapper({
   const [description, setDescription] = useState("");
   const [triggerDescription, setTriggerDescription] = useState("");
   const [triggerActions, setTriggerActions] = useState<TriggerAction[]>([]);
+  const [triggerIds, setTriggerIds] = useState<string[]>([]);
   const [outputDescription, setOutputDescription] = useState("");
   const [outputActions, setOutputActions] = useState<OutputAction[]>([]);
+  const [outputIds, setOutputIds] = useState<string[]>([]);
+  const [pendingCreate, setPendingCreate] = useState<"trigger" | "output" | "group" | null>(null);
   const [steps, setSteps] = useState<StepDraft[]>([]);
   const [selectedStepKey, setSelectedStepKey] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
@@ -318,14 +382,14 @@ export default function ProcessMapper({
   useEffect(() => {
     let active = true;
     Promise.all([
-      getNodes("ci", false),
-      getNodes("identity", false),
-      getNodes("group", false),
+      getNodes("ci", false, true),
+      getNodes("identity", false, true),
+      getNodes("group", false, true),
     ]).then(([allCIs, identities, groupNodes]) => {
       if (!active) return;
       setCIs(allCIs);
-      setPeople(identities.filter((node) => node.status === "active"));
-      setGroups(groupNodes.filter((node) => node.status === "active"));
+      setPeople(identities.filter((node) => node.status === "active" || node.status === "draft"));
+      setGroups(groupNodes.filter((node) => node.status === "active" || node.status === "draft"));
     }).catch((loadError: unknown) => {
       if (active) setError(loadError instanceof Error ? loadError.message : "Could not load records.");
     });
@@ -356,8 +420,10 @@ export default function ProcessMapper({
       setDescription(draft.description);
       setTriggerDescription(draft.triggerDescription);
       setTriggerActions(draft.triggerActions);
+      setTriggerIds(draft.triggerIds);
       setOutputDescription(draft.outputDescription);
       setOutputActions(draft.outputActions);
+      setOutputIds(draft.outputIds);
       setSteps(draft.steps);
       setSelectedStepKey(draft.steps[0]?.uiKey ?? null);
       setStage(draft.steps.length ? "steps" : "start");
@@ -378,8 +444,10 @@ export default function ProcessMapper({
       setDescription("");
       setTriggerDescription("");
       setTriggerActions([]);
+      setTriggerIds([]);
       setOutputDescription("");
       setOutputActions([]);
+      setOutputIds([]);
       setSteps([]);
       setSelectedStepKey(null);
       setStage("process");
@@ -388,6 +456,49 @@ export default function ProcessMapper({
     loadMap(process.id, process);
   }
 
+  const rememberRecord = useCallback((node: GraphNode) => {
+    if (node.kind === "ci") setCIs((current) => current.some((item) => item.id === node.id) ? current : [...current, node]);
+    if (node.kind === "group") setGroups((current) => current.some((item) => item.id === node.id) ? current : [...current, node]);
+    if (node.kind === "identity") setPeople((current) => current.some((item) => item.id === node.id) ? current : [...current, node]);
+  }, []);
+
+  useEffect(() => {
+    if (!createdRecord || !pendingCreate) return;
+    rememberRecord(createdRecord);
+    if (pendingCreate === "trigger") {
+      const ciType = String(createdRecord.properties?.ciType ?? "");
+      if (createdRecord.kind !== "ci" || !triggerCITypes.has(ciType)) {
+        setError("A trigger must be an application, process, function, or service.");
+      } else {
+        setTriggerIds((current) => current.includes(createdRecord.id) ? current : [...current, createdRecord.id]);
+        setError("");
+      }
+    } else if (pendingCreate === "output") {
+      if (createdRecord.kind !== "ci") {
+        setError("An output must be a configuration item.");
+      } else if (createdRecord.id === processId) {
+        setError("A process cannot produce itself.");
+      } else {
+        setOutputIds((current) => current.includes(createdRecord.id) ? current : [...current, createdRecord.id]);
+        setError("");
+      }
+    } else if (pendingCreate === "group") {
+      if (createdRecord.kind !== "group") {
+        setError("Create a group to add it to Performed by.");
+      } else if (selectedStepKey != null) {
+        setSteps((current) => current.map((step) => {
+          if (step.uiKey !== selectedStepKey || step.execution === "automated") return step;
+          const performers = step.performers ?? [];
+          if (performers.some((performer) => performer.id === createdRecord.id)) return step;
+          return { ...step, performers: [...performers, { kind: "group" as const, id: createdRecord.id, name: nodeDisplayName(createdRecord) }] };
+        }));
+        setError("");
+      }
+    }
+    setPendingCreate(null);
+    onCreatedRecordHandled?.();
+  }, [createdRecord, pendingCreate, processId, rememberRecord, selectedStepKey, onCreatedRecordHandled]);
+
   const applicationOptions = useMemo(
     () => cis.filter((node) => node.properties?.ciType === "application"),
     [cis],
@@ -395,6 +506,14 @@ export default function ProcessMapper({
   const automationOptions = useMemo(
     () => cis.filter((node) => node.properties?.ciType === "automation"),
     [cis],
+  );
+  const triggerCIOptions = useMemo(
+    () => cis.filter((node) => node.status !== "retired" && node.id !== processId && triggerCITypes.has(String(node.properties?.ciType ?? ""))),
+    [cis, processId],
+  );
+  const outputCIOptions = useMemo(
+    () => cis.filter((node) => node.status !== "retired" && node.id !== processId && node.properties?.ciType !== "process-step"),
+    [cis, processId],
   );
   const selectedStep = steps.find((step) => step.uiKey === selectedStepKey) ?? null;
   const stepIsAutomated = selectedStep?.execution === "automated";
@@ -425,10 +544,14 @@ export default function ProcessMapper({
   }, [processId]);
 
   useEffect(() => {
+    const triggerNames = triggerIds.map((id) => nodeDisplayName(cis.find((node) => node.id === id) ?? { id, kind: "ci", status: "active" })).filter(Boolean);
+    const outputNames = outputIds.map((id) => nodeDisplayName(cis.find((node) => node.id === id) ?? { id, kind: "ci", status: "active" })).filter(Boolean);
     const startDetail = triggerDescription.trim()
-      || (triggerActions.length ? triggerActions.map((action) => titleCase(action)).join(", ") : "No trigger yet");
+      || [...triggerActions.map((action) => titleCase(action)), ...triggerNames].join(", ")
+      || "No trigger yet";
     const endDetail = outputDescription.trim()
-      || (outputActions.length ? outputActions.map((action) => titleCase(action)).join(", ") : "No outputs yet");
+      || [...outputActions.map((action) => titleCase(action)), ...outputNames].join(", ")
+      || "No outputs yet";
     const nodes: Node<ProcessNodeData>[] = [
       {
         id: "start",
@@ -470,30 +593,46 @@ export default function ProcessMapper({
     const edgeStyle = { stroke: "var(--brand-blue)", strokeWidth: 2 };
     const marker = { type: MarkerType.ArrowClosed, width: 18, height: 18 };
     const edges: Edge[] = [];
+    const waitedOn = new Set<number>();
     if (steps.length === 0) {
       edges.push({ id: "start-end", source: "start", target: "end", markerEnd: marker, style: edgeStyle });
     } else {
-      edges.push({ id: "start-step0", source: "start", target: `step-${steps[0].uiKey}`, markerEnd: marker, style: edgeStyle });
-      for (let i = 0; i + 1 < steps.length; i++) {
+      for (const step of steps) {
+        for (const dep of step.dependsOn) {
+          if (dep.kind === "process-start") {
+            edges.push({
+              id: `start-${step.uiKey}`,
+              source: "start",
+              target: `step-${step.uiKey}`,
+              markerEnd: marker,
+              style: edgeStyle,
+            });
+            continue;
+          }
+          waitedOn.add(dep.uiKey);
+          edges.push({
+            id: `dep-${dep.uiKey}-${step.uiKey}`,
+            source: `step-${dep.uiKey}`,
+            target: `step-${step.uiKey}`,
+            markerEnd: marker,
+            style: edgeStyle,
+          });
+        }
+      }
+      for (const step of steps) {
+        if (waitedOn.has(step.uiKey)) continue;
         edges.push({
-          id: `step-${steps[i].uiKey}-${steps[i + 1].uiKey}`,
-          source: `step-${steps[i].uiKey}`,
-          target: `step-${steps[i + 1].uiKey}`,
+          id: `end-${step.uiKey}`,
+          source: `step-${step.uiKey}`,
+          target: "end",
           markerEnd: marker,
           style: edgeStyle,
         });
       }
-      edges.push({
-        id: "step-end",
-        source: `step-${steps[steps.length - 1].uiKey}`,
-        target: "end",
-        markerEnd: marker,
-        style: edgeStyle,
-      });
     }
     setFlowNodes(nodes);
     setFlowEdges(edges);
-  }, [steps, triggerDescription, triggerActions, outputDescription, outputActions, anchorPositions, defaultEndX, canUpdate]);
+  }, [steps, triggerDescription, triggerActions, triggerIds, outputDescription, outputActions, outputIds, cis, anchorPositions, defaultEndX, canUpdate]);
 
   const onNodesChange = useCallback((changes: NodeChange<Node<ProcessNodeData>>[]) => {
     setFlowNodes((current) => applyNodeChanges(changes, current));
@@ -527,7 +666,7 @@ export default function ProcessMapper({
       if (index < 0 || next < 0 || next >= current.length) return current;
       const copy = [...current];
       [copy[index], copy[next]] = [copy[next], copy[index]];
-      return copy.map((step, order) => ({ ...step, order: order + 1 }));
+      return keepEarlierDependencies(copy);
     });
   }
 
@@ -551,6 +690,7 @@ export default function ProcessMapper({
       if (!activeProcessId) {
         const created = await createNode("ci", {
           properties: { ciType: "process", name: processName, category: "business", description: description.trim() },
+          status: "draft",
         });
         createdNew = true;
         activeProcessId = created.id;
@@ -566,8 +706,10 @@ export default function ProcessMapper({
         description: description.trim(),
         triggerActions,
         triggerDescription: triggerDescription.trim(),
+        triggers: triggerIds.map((id): ProcessMapRef => ({ kind: "ci", id })),
         outputActions,
         outputDescription: outputDescription.trim(),
+        outputs: outputIds.map((id): ProcessMapRef => ({ kind: "ci", id })),
         steps: steps.map((step, index) => ({
           ...(step.id ? { id: step.id } : {}),
           name: step.name.trim(),
@@ -580,22 +722,35 @@ export default function ProcessMapper({
           ...(typeof step.x === "number" ? { x: step.x } : {}),
           ...(typeof step.y === "number" ? { y: step.y } : {}),
           performers: (step.performers ?? []).map(({ kind, id }) => ({ kind, id })),
+          dependsOn: step.dependsOn.map((dep): ProcessMapDependency => {
+            if (dep.kind === "process-start") return { kind: "process-start" };
+            const targetIndex = steps.findIndex((item) => item.uiKey === dep.uiKey);
+            const target = steps[targetIndex];
+            return { kind: "step", ...(target?.id ? { id: target.id } : {}), order: targetIndex + 1 };
+          }),
         })),
       };
+      const addedStepCount = steps.filter((step) => !step.id).length;
       const saved = await saveProcessMap(activeProcessId, payload);
       const draft = draftFromMap(saved);
       setName(draft.name);
       setDescription(draft.description);
       setTriggerDescription(draft.triggerDescription);
       setTriggerActions(draft.triggerActions);
+      setTriggerIds(draft.triggerIds);
       setOutputDescription(draft.outputDescription);
       setOutputActions(draft.outputActions);
+      setOutputIds(draft.outputIds);
       const previousId = steps.find((step) => step.uiKey === selectedStepKey)?.id;
       setSteps(draft.steps);
       setSelectedStepKey((draft.steps.find((step) => step.id && step.id === previousId) ?? draft.steps[0])?.uiKey ?? null);
-      onNotify(createdNew
-        ? `Created process and saved map for ${saved.name || saved.processId}.`
-        : `Saved process map for ${saved.name || saved.processId}.`);
+      const draftPackage = createdNew || selectedProcess?.status === "draft";
+      const addedDraft = !draftPackage && addedStepCount > 0;
+      onNotify(draftPackage
+        ? `Saved ${saved.name || saved.processId} as a draft. It stays off the live inventory until a super admin publishes it from Home.`
+        : addedDraft
+          ? `Saved ${saved.name || saved.processId}. ${addedStepCount === 1 ? "The new step was" : `${addedStepCount} new steps were`} saved as draft for approval.`
+          : `Saved process map for ${saved.name || saved.processId}.`);
     } catch (saveError: unknown) {
       setError(saveError instanceof Error ? saveError.message : "Could not save process map.");
     } finally {
@@ -689,6 +844,9 @@ export default function ProcessMapper({
           )}
         </div>
 
+        {(selectedProcess?.status === "draft" || (!processId && canUpdate)) && (
+          <p className="field-hint">New processes, new steps, and records created with + are saved as draft, including steps added after a process is already active. They show as a package on the super admin home until they are published.</p>
+        )}
         {error && <p className="form-error" role="alert">{error}</p>}
         {loading && <p className="field-hint">Loading process map…</p>}
 
@@ -723,6 +881,18 @@ export default function ProcessMapper({
               readOnly={!canUpdate}
               onChange={(next) => setTriggerActions(next as TriggerAction[])}
             />
+            <RecordPicker
+              id="process-trigger-cis"
+              label="Trigger configuration items"
+              hint="Stored as triggered-by. An application, process, function, or service that starts this process."
+              placeholder="Find a configuration item by name or ID"
+              options={triggerCIOptions}
+              selected={triggerIds}
+              readOnly={!canUpdate}
+              onChange={setTriggerIds}
+              onCreate={canUpdate && canCreateCI && onCreateRecord ? () => { setPendingCreate("trigger"); onCreateRecord("ci", { ciType: "application" }); } : undefined}
+              createLabel="Create configuration item"
+            />
             <div className="form-field">
               <label htmlFor="process-trigger-note">Trigger description</label>
               <textarea
@@ -748,7 +918,12 @@ export default function ProcessMapper({
                     type="button"
                     onClick={() => {
                       const step = newStep();
-                      setSteps((current) => [...current, { ...step, order: current.length + 1 }]);
+                      setSteps((current) => {
+                        const dependsOn: StepDependency[] = current.length === 0
+                          ? [{ kind: "process-start" }]
+                          : [{ kind: "step", uiKey: current[current.length - 1].uiKey }];
+                        return [...current, { ...step, order: current.length + 1, dependsOn }];
+                      });
                       setSelectedStepKey(step.uiKey);
                     }}
                   >
@@ -773,7 +948,7 @@ export default function ProcessMapper({
                             className="icon-button"
                             aria-label="Remove step"
                             onClick={() => {
-                              setSteps((current) => current.filter((item) => item.uiKey !== step.uiKey).map((item, order) => ({ ...item, order: order + 1 })));
+                              setSteps((current) => keepEarlierDependencies(current.filter((item) => item.uiKey !== step.uiKey)));
                               if (selectedStepKey === step.uiKey) setSelectedStepKey(null);
                             }}
                           >
@@ -816,7 +991,40 @@ export default function ProcessMapper({
                   selected={(selectedStep.performers ?? []).map((performer) => performer.id)}
                   readOnly={!canUpdate}
                   onChange={(ids) => setStepPerformers(selectedStep.uiKey, ids)}
+                  onCreate={canUpdate && canCreateGroup && onCreateRecord && !stepIsAutomated ? () => { setPendingCreate("group"); onCreateRecord("group"); } : undefined}
+                  createLabel="Create group"
                 />
+                <fieldset className="process-mapper-actions" disabled={!canUpdate}>
+                  <legend>Depends on</legend>
+                  <ul className="process-mapper-action-list process-mapper-dependencies" id={`step-depends-${selectedStep.uiKey}`}>
+                    {[{ key: "process-start", label: "Process Start" }, ...steps.slice(0, steps.findIndex((step) => step.uiKey === selectedStep.uiKey)).map((step, index) => ({
+                      key: `step:${step.uiKey}`,
+                      label: `Step ${index + 1}${step.name.trim() ? ` · ${step.name.trim()}` : ""}`,
+                    }))].map((option) => {
+                      const checked = option.key === "process-start"
+                        ? selectedStep.dependsOn.some((dep) => dep.kind === "process-start")
+                        : selectedStep.dependsOn.some((dep) => dep.kind === "step" && `step:${dep.uiKey}` === option.key);
+                      return <li key={option.key}>
+                        <label htmlFor={`step-depends-${selectedStep.uiKey}-${option.key}`}>
+                          <input
+                            id={`step-depends-${selectedStep.uiKey}-${option.key}`}
+                            type="checkbox"
+                            checked={checked}
+                            disabled={!canUpdate}
+                            onChange={() => {
+                              const next = checked
+                                ? selectedStep.dependsOn.filter((dep) => (dep.kind === "process-start" ? "process-start" : `step:${dep.uiKey}`) !== option.key)
+                                : [...selectedStep.dependsOn, option.key === "process-start" ? { kind: "process-start" as const } : { kind: "step" as const, uiKey: Number(option.key.slice("step:".length)) }];
+                              updateStep(selectedStep.uiKey, { dependsOn: next });
+                            }}
+                          />
+                          <span>{option.label}</span>
+                        </label>
+                      </li>;
+                    })}
+                  </ul>
+                  <p className="field-hint">Steps that depend on Process Start begin together. Select earlier steps when this step should wait for them. More than one selection means it waits for all of them. Stored as depends-on.</p>
+                </fieldset>
                 <label className="retired-toggle" htmlFor="step-creates-case">
                   <input
                     id="step-creates-case"
@@ -873,6 +1081,18 @@ export default function ProcessMapper({
               selected={outputActions}
               readOnly={!canUpdate}
               onChange={(next) => setOutputActions(next as OutputAction[])}
+            />
+            <RecordPicker
+              id="process-output-cis"
+              label="Output configuration items"
+              hint="Stored as produces. The configuration items this process creates or updates."
+              placeholder="Find a configuration item by name or ID"
+              options={outputCIOptions}
+              selected={outputIds}
+              readOnly={!canUpdate}
+              onChange={setOutputIds}
+              onCreate={canUpdate && canCreateCI && onCreateRecord ? () => { setPendingCreate("output"); onCreateRecord("ci"); } : undefined}
+              createLabel="Create configuration item"
             />
             <div className="form-field">
               <label htmlFor="process-output-note">Output description</label>

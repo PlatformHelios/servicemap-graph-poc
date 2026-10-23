@@ -81,8 +81,8 @@ func TestNodeListSource(t *testing.T) {
 		t.Fatalf("params = %#v", params)
 	}
 	plain, _ := nodeListSource("Identity", "id", cmdb.ListOptions{IncludeRetired: true})
-	if plain != "MATCH (node:Identity)" {
-		t.Fatalf("include-retired source = %q, want no WHERE", plain)
+	if !strings.Contains(plain, "node.status IN ['active', 'retired']") {
+		t.Fatalf("include-retired source = %q, want active and retired", plain)
 	}
 }
 

@@ -266,7 +266,6 @@ function recordSummary(record: GraphNode): { label: string; value: string }[] {
       add("Affects", nameList(ends("affects", "to"), "CI"));
       break;
     case "case":
-      if (properties.olaEnabled === true) add("OLA", `${Number(properties.olaBusinessDays) || 0} business days`);
       add("Assigned to", nameList(ends(incidentAssignmentKind, "to"), "assignee"));
       add("Process step", nameList(ends("case-for", "to"), "step"));
       break;
@@ -678,6 +677,9 @@ function App() {
   const [retiring, setRetiring] = useState<RetireTarget | null>(null);
   const [toast, setToast] = useState("");
   const [processMapperId, setProcessMapperId] = useState<string | null>(null);
+  const [mapFocus, setMapFocus] = useState<{ kind: "incident" | "case"; id: string } | null>(null);
+  const [mapperCreated, setMapperCreated] = useState<GraphNode | null>(null);
+  const mapperCreatePending = useRef(false);
   const [reload, setReload] = useState(0);
   // The Vendor Request Form view is the form itself: a blank request ready for
   // entry, or a saved request reopened from the list beneath it. The version
@@ -839,7 +841,7 @@ function App() {
         let saved: GraphNode;
         if (target.record) saved = Object.keys(draftProperties).length > 0 ? await updateNode(target.kind, target.record.id, draftProperties) : target.record;
         else {
-          saved = await createNode(target.kind, { properties: draftProperties, ...(ciIDs.length > 0 ? { ciIds: ciIDs } : {}) });
+          saved = await createNode(target.kind, { properties: draftProperties, ...(ciIDs.length > 0 ? { ciIds: ciIDs } : {}), ...(mapperCreatePending.current ? { status: "draft" as const } : {}) });
         }
         // RACI roles, incident assignment, and the request's requester are
         // relationships on the record; reconcile what the form shows against
@@ -855,6 +857,10 @@ function App() {
           }
         }
         if (submittingRequest) await updateNode(target.kind, saved.id, { state: "submitted" });
+        if (mapperCreatePending.current && !target.record) {
+          mapperCreatePending.current = false;
+          setMapperCreated(saved);
+        }
       } else {
         const kind = target.record?.kind ?? target.kind;
         if (!kind) throw new Error("Choose a relationship type.");
@@ -950,8 +956,8 @@ function App() {
             <Metric label={resource === "relationships" ? "LINK RECORDS" : "DIRECT LINKS (PAGE)"} value={loading ? "—" : relationshipCount} />
           </section>}
 
-          {resource === "home" ? <Suspense fallback={<div className="editor-dialog editor-inline workflow-loading">Loading your workspace…</div>}><Home user={user} metadata={metadata} reload={reload} onNotify={setToast} onOpenRequest={openRequest} onOpenTasks={() => { setResource("workflow-tasks"); setSearch(""); }} /></Suspense>
-          : resource === "map" ? <Suspense fallback={<div className="map-canvas map-overlay">Loading graph tools…</div>}><GraphMap metadata={metadata} includeRetired={includeRetired} reload={reload} onToggleIncludeRetired={() => setIncludeRetired((value) => !value)} onCreateLinked={(kind, ci) => {
+          {resource === "home" ? <Suspense fallback={<div className="editor-dialog editor-inline workflow-loading">Loading your workspace…</div>}><Home user={user} metadata={metadata} reload={reload} onNotify={setToast} onOpenRequest={openRequest} onOpenTasks={() => { setResource("workflow-tasks"); setSearch(""); }} onOpenProcess={(id) => { setProcessMapperId(id); setResource("process-mapper"); setSearch(""); }} /></Suspense>
+          : resource === "map" ? <Suspense fallback={<div className="map-canvas map-overlay">Loading graph tools…</div>}><GraphMap metadata={metadata} includeRetired={includeRetired} reload={reload} focus={mapFocus} onFocusApplied={() => setMapFocus(null)} onToggleIncludeRetired={() => setIncludeRetired((value) => !value)} onCreateLinked={(kind, ci) => {
             const open = (record: GraphNode) => setEditor({
               type: "node",
               kind,
@@ -970,7 +976,7 @@ function App() {
             else editNode(record);
           }} /></Suspense>
           : resource === "location-map" ? <Suspense fallback={<div className="map-canvas map-overlay">Loading location map…</div>}><LocationMap reload={reload} onEdit={editNode} /></Suspense>
-          : resource === "process-mapper" ? <Suspense fallback={<div className="editor-dialog editor-inline workflow-loading">Loading Process Mapper…</div>}><ProcessMapper metadata={metadata} reload={reload} onNotify={setToast} initialProcessId={processMapperId} canUpdate={canUpdateResource(access, "process-mapper")} /></Suspense>
+          : resource === "process-mapper" ? <Suspense fallback={<div className="editor-dialog editor-inline workflow-loading">Loading Process Mapper…</div>}><ProcessMapper metadata={metadata} reload={reload} onNotify={setToast} initialProcessId={processMapperId} canUpdate={canUpdateResource(access, "process-mapper")} canCreateCI={canCreateResource(access, "ci")} canCreateGroup={canCreateResource(access, "group")} createdRecord={mapperCreated} onCreatedRecordHandled={() => setMapperCreated(null)} onCreateRecord={(kind, defaults) => { mapperCreatePending.current = true; setEditor({ type: "node", kind, ...(defaults ? { defaults } : {}) }); }} /></Suspense>
           : resource === "workflow-creator" ? <Suspense fallback={<div className="editor-dialog editor-inline workflow-loading">Loading Workflow Creator…</div>}><WorkflowCreator metadata={metadata} reload={reload} onNotify={setToast} /></Suspense>
           : resource === "workflow-tasks" ? <Suspense fallback={<div className="editor-dialog editor-inline workflow-loading">Loading Workflow Tasks…</div>}><WorkflowTasks user={user} metadata={metadata} reload={reload} onNotify={setToast} onOpenRequest={openRequest} onRetire={(task) => setRetiring({ type: "node", kind: "task", record: { kind: "task", id: task.id, status: "active", properties: { name: task.step.name } } })} /></Suspense>
           : resource === "workflow-analyzer" ? <Suspense fallback={<div className="editor-dialog editor-inline workflow-loading">Loading Workflow Analyzer…</div>}><WorkflowAnalyzer reload={reload} canPublish={access?.superAdmin === true || (access?.capabilities ?? []).includes("catalog:publish")} /></Suspense>
@@ -1023,7 +1029,13 @@ function App() {
         <footer className="page-footer"><span>{chrome.section}</span><span>{chrome.page} · API V1</span></footer>
       </div>
 
-      {editor && <RecordDialog key={`${editor.type}-${editor.kind ?? editor.record?.kind}-${editorRecordKey}`} target={editor} metadata={metadata} onClose={() => setEditor(null)} onSave={saveRecord} onOpenProcessMapper={canViewResource(access, "process-mapper") ? (process) => {
+      {editor && <RecordDialog key={`${editor.type}-${editor.kind ?? editor.record?.kind}-${editorRecordKey}`} target={editor} metadata={metadata} onClose={() => { mapperCreatePending.current = false; setEditor(null); }} onSave={saveRecord} onShowOnMap={canViewResource(access, "map") ? (node) => {
+        if (node.status === "retired") setIncludeRetired(true);
+        setMapFocus({ kind: node.kind as "incident" | "case", id: node.id });
+        setEditor(null);
+        setResource("map");
+        setSearch("");
+      } : undefined} onOpenProcessMapper={canViewResource(access, "process-mapper") ? (process) => {
         setEditor(null);
         setProcessMapperId(process.id);
         setResource("process-mapper");
@@ -1109,7 +1121,7 @@ function Metric({ label, value }: { label: string; value: string | number }) {
   return <div className="metric"><span className="metric-label">{label}</span><strong>{value}</strong></div>;
 }
 
-function StatusPill({ status }: { status: "active" | "retired" }) {
+function StatusPill({ status }: { status: "active" | "retired" | "draft" }) {
   return <span className={`status-pill status-${status}`}>{status}</span>;
 }
 
@@ -1118,7 +1130,7 @@ function retireVerb(kind?: NodeKind) {
   return kind === "incident" || kind === "case" ? "Resolve/Retire" : "Retire";
 }
 
-function RowActions({ status, kind, canEdit = true, canRetire = true, onEdit, onRetire }: { status: "active" | "retired"; kind?: NodeKind; canEdit?: boolean; canRetire?: boolean; onEdit: () => void; onRetire: () => void }) {
+function RowActions({ status, kind, canEdit = true, canRetire = true, onEdit, onRetire }: { status: "active" | "retired" | "draft"; kind?: NodeKind; canEdit?: boolean; canRetire?: boolean; onEdit: () => void; onRetire: () => void }) {
   const verb = retireVerb(kind);
   if (!canEdit && !(canRetire && status !== "retired")) return <span className="secondary-value">—</span>;
   return <div className="row-actions">
@@ -1139,7 +1151,7 @@ function NodeRow({ record, canEdit, canRetire, onEdit, onRetire }: { record: Gra
     <td><span className="identifier">{record.id}</span></td>
     <td><div className="primary-value">{isAutomation && <Settings size={14} strokeWidth={2.2} className="ci-type-icon" aria-label="Automation" />}<span>{displayName}</span></div><div className="secondary-value">{recordType}{properties.siteId ? ` · ${properties.siteId}` : ""}</div>{openState && <span className={`status-pill open-state ${openState === "open" ? "status-active" : "status-retired"}`}>{openState === "open" ? "Open now" : "Closed now"}</span>}{requestState && <span className={`status-pill open-state ${requestStatePillClass(requestState)}`}>{requestState}</span>}</td>
     <td><div className="property-list">{scalarProperties(properties)}</div></td>
-    <td><div className="relationship-list">{summary.length === 0
+    <td><div className="relationship-list">{record.kind === "case" && record.ola?.enabled && <AgreementMeter clock={record.ola} />}{summary.length === 0 && !record.ola?.enabled
       ? <span className="secondary-value">—</span>
       : summary.map((line) => <div className="relationship-line" key={line.label}><strong>{line.label}</strong> → {line.value}</div>)}</div></td>
     <td><StatusPill status={record.status} /></td>
@@ -1158,12 +1170,13 @@ function RelationshipRow({ record, canEdit, canRetire, onEdit, onRetire }: { rec
   </tr>;
 }
 
-function RecordDialog({ target, metadata, inline, onClose, onSave, onOpenProcessMapper }: {
+function RecordDialog({ target, metadata, inline, onClose, onSave, onShowOnMap, onOpenProcessMapper }: {
   target: RecordEditorTarget;
   metadata: Metadata | null;
   inline?: boolean; // render as a page panel (the Vendor Request Form view) instead of a modal
   onClose: () => void;
   onSave: (target: RecordEditorTarget, fromId: string, toId: string, properties: Properties, ciIDs: string[], links?: LinkAssignments) => Promise<void>;
+  onShowOnMap?: (node: GraphNode) => void;
   onOpenProcessMapper?: (process: GraphNode) => void;
 }) {
   const nodeRecord = target.type === "node" ? target.record : undefined;
@@ -1686,9 +1699,13 @@ function RecordDialog({ target, metadata, inline, onClose, onSave, onOpenProcess
             {editing && target.type === "node" && target.kind === "ci" && nodeRecord?.properties?.ciType === "process" && onOpenProcessMapper && (
               <button className="button button-quiet icon-button" type="button" onClick={() => onOpenProcessMapper(nodeRecord)}><Waypoints size={14} />Process Mapper</button>
             )}
+            {editing && nodeRecord && (nodeRecord.kind === "incident" || nodeRecord.kind === "case") && onShowOnMap && (
+              <button className="button button-quiet icon-button" type="button" onClick={() => onShowOnMap(nodeRecord)}><Network size={14} />Show on Map</button>
+            )}
             {(!inline || editing) && <button className="close-button" type="button" onClick={onClose} aria-label={inline ? "Start a new request" : "Close"} title={inline ? "Start a new request" : undefined}><X size={17} /></button>}
           </div>
         </div>
+        {editing && isCase && nodeRecord?.ola?.enabled && <div className="agreement-row"><AgreementMeter clock={nodeRecord.ola} /></div>}
         {hasRACI && <div className="dialog-tabs" role="tablist" aria-label="Record sections">
           <button type="button" role="tab" id="tab-details" aria-selected={tab === "details"} aria-controls="panel-details" className={tab === "details" ? "active" : ""} onClick={() => setTab("details")}>Details</button>
           <button type="button" role="tab" id="tab-raci" aria-selected={tab === "raci"} aria-controls="panel-raci" className={tab === "raci" ? "active" : ""} onClick={() => setTab("raci")}>RACI<span className="tab-count">{raciRoles.reduce((total, { role }) => total + raci[role].length, 0)}</span></button>

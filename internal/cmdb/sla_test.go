@@ -92,6 +92,22 @@ func TestAgreementClockStatuses(t *testing.T) {
 	}
 }
 
+func TestCaseOLAClockUsesOpenedAt(t *testing.T) {
+	node := Node{
+		Kind: Case, Status: "active",
+		Properties: map[string]any{"olaEnabled": true, "olaBusinessDays": 3, "openedAt": "2025-10-03T09:00:00Z"},
+	}
+	clock := olaClockForCase(node, time.Date(2025, 10, 3, 17, 0, 0, 0, time.UTC), nil)
+	if clock == nil || !clock.Enabled || clock.Kind != "ola" || clock.Status != ClockOnTrack || clock.RemainingDays != 2 {
+		t.Fatalf("case clock = %+v", clock)
+	}
+	off := Node{Kind: Case, Status: "active", Properties: map[string]any{"olaEnabled": false}}
+	disabled := olaClockForCase(off, time.Date(2025, 10, 3, 17, 0, 0, 0, time.UTC), nil)
+	if disabled.Enabled || disabled.Status != ClockNone {
+		t.Fatalf("disabled case clock = %+v", disabled)
+	}
+}
+
 func TestParseHolidayDate(t *testing.T) {
 	if _, err := ParseHolidayDate("2025-13-01"); err == nil {
 		t.Fatal("accepted invalid month")

@@ -171,8 +171,8 @@ const (
 type ExecutionModel string
 
 const (
-	ManualExecution     ExecutionModel = "manual"
-	AutomatedExecution  ExecutionModel = "automated"
+	ManualExecution    ExecutionModel = "manual"
+	AutomatedExecution ExecutionModel = "automated"
 )
 
 // AutomationEnvironment is the runtime stage an automation CI runs in.
@@ -218,18 +218,18 @@ type nodeSpec struct {
 }
 
 var nodeSpecs = map[NodeKind]nodeSpec{
-	Identity:    {label: "Identity", key: "id"},
-	JobCode:     {label: "JobCode", key: "code"},
-	Birthright:  {label: "Birthright", key: "id"},
-	Role:        {label: "Role", key: "id"},
-	Entitlement: {label: "Entitlement", key: "id"},
-	Group:       {label: "Group", key: "id"},
-	CI:          {label: "CI", key: "id"},
-	Incident:    {label: "Incident", key: "id"},
-	Case:        {label: "Case", key: "id"},
-	Change:      {label: "Change", key: "id"},
-	Event:       {label: "Event", key: "id"},
-	Request:     {label: "Request", key: "id"},
+	Identity:     {label: "Identity", key: "id"},
+	JobCode:      {label: "JobCode", key: "code"},
+	Birthright:   {label: "Birthright", key: "id"},
+	Role:         {label: "Role", key: "id"},
+	Entitlement:  {label: "Entitlement", key: "id"},
+	Group:        {label: "Group", key: "id"},
+	CI:           {label: "CI", key: "id"},
+	Incident:     {label: "Incident", key: "id"},
+	Case:         {label: "Case", key: "id"},
+	Change:       {label: "Change", key: "id"},
+	Event:        {label: "Event", key: "id"},
+	Request:      {label: "Request", key: "id"},
 	Workflow:     {label: "Workflow", key: "id"},
 	WorkflowStep: {label: "WorkflowStep", key: "id"},
 	WorkflowRun:  {label: "WorkflowRun", key: "id"},
@@ -258,11 +258,11 @@ const (
 	// Business process maps: a Process CI links process-step to its first
 	// Process Step CI; later steps are chained with next-in-process. Distinct
 	// from catalog workflow has-step / next-step.
-	ProcessStep    RelationshipKind = "process-step"
-	NextInProcess  RelationshipKind = "next-in-process"
-	TriggeredBy    RelationshipKind = "triggered-by"
-	Produces       RelationshipKind = "produces"
-	Member       RelationshipKind = "member"
+	ProcessStep   RelationshipKind = "process-step"
+	NextInProcess RelationshipKind = "next-in-process"
+	TriggeredBy   RelationshipKind = "triggered-by"
+	Produces      RelationshipKind = "produces"
+	Member        RelationshipKind = "member"
 	// Catalog requests are tied to their requester: drafted-request while the
 	// form is a draft, replaced by form-submitted when it is submitted.
 	DraftedRequest RelationshipKind = "drafted-request"
@@ -288,8 +288,8 @@ const (
 	// permissions an identity directly (exception access granted outside a
 	// birthright). An access request names the identity it is for and the
 	// items it asks for; each task of its run decides or provisions one item.
-	HasRole    RelationshipKind = "has-role"
-	EntitledBy RelationshipKind = "entitled-by"
+	HasRole        RelationshipKind = "has-role"
+	EntitledBy     RelationshipKind = "entitled-by"
 	Permissions    RelationshipKind = "permissions"
 	RequestedFor   RelationshipKind = "requested-for"
 	RequestsAccess RelationshipKind = "requests-access"
@@ -306,10 +306,10 @@ const (
 	VisibleTo       RelationshipKind = "visible-to"
 	ApprovedThrough RelationshipKind = "approved-through"
 	References      RelationshipKind = "references"
-	Accountable RelationshipKind = "accountable"
-	Responsible RelationshipKind = "responsible"
-	Consulted   RelationshipKind = "consulted"
-	Informed    RelationshipKind = "informed"
+	Accountable     RelationshipKind = "accountable"
+	Responsible     RelationshipKind = "responsible"
+	Consulted       RelationshipKind = "consulted"
+	Informed        RelationshipKind = "informed"
 	// DevelopedBy names the single identity who develops an automation CI.
 	DevelopedBy RelationshipKind = "developed-by"
 )
@@ -320,11 +320,11 @@ type relationshipSpec struct {
 	typeName    string
 	inverse     string
 	from        NodeKind
-	fromKinds   []NodeKind // when set, the from node may be any of these kinds
-	to          NodeKind   // primary to kind
-	toKinds     []NodeKind // when set, the to node may be any of these kinds
-	fromCITypes []CIType   // when set, the from node must be a CI of one of these types
-	toCITypes   []CIType   // when set, the to node must be a CI of one of these types
+	fromKinds   []NodeKind   // when set, the from node may be any of these kinds
+	to          NodeKind     // primary to kind
+	toKinds     []NodeKind   // when set, the to node may be any of these kinds
+	fromCITypes []CIType     // when set, the from node must be a CI of one of these types
+	toCITypes   []CIType     // when set, the to node must be a CI of one of these types
 	ciTypeRules []CITypeRule // when set, the (from, to) CI types must satisfy one of these pairings instead
 }
 
@@ -341,9 +341,9 @@ type RelationshipDefinition struct {
 	From        NodeKind
 	FromKinds   []NodeKind // every kind the from node may have; always contains From
 	To          NodeKind
-	ToKinds     []NodeKind // every kind the to node may have; always contains To
-	FromCITypes []CIType   // union of every rule's from types (for labels); empty = any
-	ToCITypes   []CIType   // union of every rule's to types (for labels); empty = any
+	ToKinds     []NodeKind   // every kind the to node may have; always contains To
+	FromCITypes []CIType     // union of every rule's from types (for labels); empty = any
+	ToCITypes   []CIType     // union of every rule's to types (for labels); empty = any
 	CITypeRules []CITypeRule // the pairings that are actually enforced; empty = unrestricted
 }
 
@@ -368,40 +368,40 @@ var relationshipSpecs = map[RelationshipKind]relationshipSpec{
 		{From: []CIType{ServiceCI, Function}, To: []CIType{ServiceCI, Function}},
 		{From: []CIType{Vendor}, To: []CIType{Application, Server, Printer}},
 	}},
-	ProcessStep: {typeName: "PROCESS_STEP", inverse: "step-in", from: CI, to: CI, fromCITypes: []CIType{Process}, toCITypes: []CIType{ProcessStepCI}},
+	ProcessStep:   {typeName: "PROCESS_STEP", inverse: "step-in", from: CI, to: CI, fromCITypes: []CIType{Process}, toCITypes: []CIType{ProcessStepCI}},
 	NextInProcess: {typeName: "NEXT_IN_PROCESS", inverse: "previous-in-process", from: CI, to: CI, fromCITypes: []CIType{ProcessStepCI}, toCITypes: []CIType{ProcessStepCI}},
 	// A process may be kicked off by another CI, or by a person or group.
-	TriggeredBy: {typeName: "TRIGGERED_BY", inverse: "triggers", from: CI, to: CI, toKinds: []NodeKind{CI, Identity, Group}, fromCITypes: []CIType{Process}, toCITypes: []CIType{Application, Process, Function, ServiceCI}},
-	Produces: {typeName: "PRODUCES", inverse: "produced-by", from: CI, to: CI, fromCITypes: []CIType{Process, Function, ProcessStepCI}},
-	Member:       {typeName: "MEMBER", inverse: "member-of", from: Group, to: Identity},
-	DraftedRequest: {typeName: "DRAFTED_REQUEST", inverse: "drafted-request-for", from: Identity, to: Request},
-	FormSubmitted:  {typeName: "FORM_SUBMITTED", inverse: "submitted-by", from: Identity, to: Request},
-	HasStep:        {typeName: "HAS_STEP", inverse: "step-of", from: Workflow, to: WorkflowStep},
-	NextStep:       {typeName: "NEXT_STEP", inverse: "previous-step", from: WorkflowStep, to: WorkflowStep},
-	StepAssignedTo: {typeName: "STEP_ASSIGNED_TO", inverse: "assigned-step", from: WorkflowStep, to: Identity, toKinds: []NodeKind{Identity, Group}},
-	RunFor:         {typeName: "RUN_FOR", inverse: "has-run", from: WorkflowRun, to: Request},
-	InstanceOf:     {typeName: "INSTANCE_OF", inverse: "has-instance", from: WorkflowRun, to: Workflow},
-	TaskFor:        {typeName: "TASK_FOR", inverse: "has-task", from: Task, to: WorkflowRun},
-	TaskStep:       {typeName: "TASK_STEP", inverse: "step-task", from: Task, to: WorkflowStep},
-	TaskAssignedTo: {typeName: "TASK_ASSIGNED_TO", inverse: "assigned-task", from: Task, to: Identity, toKinds: []NodeKind{Identity, Group}},
-	ActedBy:        {typeName: "ACTED_BY", inverse: "acted-on", from: Task, to: Identity},
-	FulfilledBy:    {typeName: "FULFILLED_BY", inverse: "fulfills", from: Request, to: CI},
-	HasRole:    {typeName: "HAS_ROLE", inverse: "role-for", from: CI, fromCITypes: []CIType{Application}, to: Role},
-	EntitledBy: {typeName: "ENTITLED_BY", inverse: "entitlement-for", from: CI, fromCITypes: []CIType{Application}, to: Entitlement},
-	Permissions:    {typeName: "PERMISSIONS", inverse: "permissioned-by", from: Role, fromKinds: []NodeKind{Role, Entitlement}, to: Identity},
-	RequestedFor:   {typeName: "REQUESTED_FOR", inverse: "subject-of", from: Request, to: Identity},
-	RequestsAccess: {typeName: "REQUESTS_ACCESS", inverse: "requested-on", from: Request, to: Role, toKinds: []NodeKind{Role, Entitlement}},
-	TaskItem:       {typeName: "TASK_ITEM", inverse: "item-task", from: Task, to: Role, toKinds: []NodeKind{Role, Entitlement}},
+	TriggeredBy:     {typeName: "TRIGGERED_BY", inverse: "triggers", from: CI, to: CI, toKinds: []NodeKind{CI, Identity, Group}, fromCITypes: []CIType{Process}, toCITypes: []CIType{Application, Process, Function, ServiceCI}},
+	Produces:        {typeName: "PRODUCES", inverse: "produced-by", from: CI, to: CI, fromCITypes: []CIType{Process, Function, ProcessStepCI}},
+	Member:          {typeName: "MEMBER", inverse: "member-of", from: Group, to: Identity},
+	DraftedRequest:  {typeName: "DRAFTED_REQUEST", inverse: "drafted-request-for", from: Identity, to: Request},
+	FormSubmitted:   {typeName: "FORM_SUBMITTED", inverse: "submitted-by", from: Identity, to: Request},
+	HasStep:         {typeName: "HAS_STEP", inverse: "step-of", from: Workflow, to: WorkflowStep},
+	NextStep:        {typeName: "NEXT_STEP", inverse: "previous-step", from: WorkflowStep, to: WorkflowStep},
+	StepAssignedTo:  {typeName: "STEP_ASSIGNED_TO", inverse: "assigned-step", from: WorkflowStep, to: Identity, toKinds: []NodeKind{Identity, Group}},
+	RunFor:          {typeName: "RUN_FOR", inverse: "has-run", from: WorkflowRun, to: Request},
+	InstanceOf:      {typeName: "INSTANCE_OF", inverse: "has-instance", from: WorkflowRun, to: Workflow},
+	TaskFor:         {typeName: "TASK_FOR", inverse: "has-task", from: Task, to: WorkflowRun},
+	TaskStep:        {typeName: "TASK_STEP", inverse: "step-task", from: Task, to: WorkflowStep},
+	TaskAssignedTo:  {typeName: "TASK_ASSIGNED_TO", inverse: "assigned-task", from: Task, to: Identity, toKinds: []NodeKind{Identity, Group}},
+	ActedBy:         {typeName: "ACTED_BY", inverse: "acted-on", from: Task, to: Identity},
+	FulfilledBy:     {typeName: "FULFILLED_BY", inverse: "fulfills", from: Request, to: CI},
+	HasRole:         {typeName: "HAS_ROLE", inverse: "role-for", from: CI, fromCITypes: []CIType{Application}, to: Role},
+	EntitledBy:      {typeName: "ENTITLED_BY", inverse: "entitlement-for", from: CI, fromCITypes: []CIType{Application}, to: Entitlement},
+	Permissions:     {typeName: "PERMISSIONS", inverse: "permissioned-by", from: Role, fromKinds: []NodeKind{Role, Entitlement}, to: Identity},
+	RequestedFor:    {typeName: "REQUESTED_FOR", inverse: "subject-of", from: Request, to: Identity},
+	RequestsAccess:  {typeName: "REQUESTS_ACCESS", inverse: "requested-on", from: Request, to: Role, toKinds: []NodeKind{Role, Entitlement}},
+	TaskItem:        {typeName: "TASK_ITEM", inverse: "item-task", from: Task, to: Role, toKinds: []NodeKind{Role, Entitlement}},
 	ForCatalogItem:  {typeName: "FOR_CATALOG_ITEM", inverse: "has-catalog-request", from: Request, to: CatalogItem},
 	CatalogOwnedBy:  {typeName: "CATALOG_OWNED_BY", inverse: "owns-catalog-item", from: CatalogItem, to: Group},
 	VisibleTo:       {typeName: "VISIBLE_TO", inverse: "sees-catalog-item", from: CatalogItem, to: Group},
 	ApprovedThrough: {typeName: "APPROVED_THROUGH", inverse: "approves-catalog-item", from: CatalogItem, to: Workflow},
 	References:      {typeName: "REFERENCES", inverse: "referenced-by", from: Request, to: CI},
-	Accountable:  {typeName: "ACCOUNTABLE", inverse: "accountable-for", from: CI, fromKinds: raciOwnedKinds, to: Identity},
-	Responsible:  {typeName: "RESPONSIBLE", inverse: "responsible-for", from: CI, fromKinds: raciOwnedKinds, to: Identity, toKinds: []NodeKind{Identity, Group}},
-	Consulted:    {typeName: "CONSULTED", inverse: "consulted-on", from: CI, fromKinds: raciOwnedKinds, to: Identity, toKinds: []NodeKind{Identity, Group}},
-	Informed:     {typeName: "INFORMED", inverse: "informed-of", from: CI, fromKinds: raciOwnedKinds, to: Identity, toKinds: []NodeKind{Identity, Group}},
-	DevelopedBy:  {typeName: "DEVELOPED_BY", inverse: "developer-of", from: CI, to: Identity, fromCITypes: []CIType{Automation}},
+	Accountable:     {typeName: "ACCOUNTABLE", inverse: "accountable-for", from: CI, fromKinds: raciOwnedKinds, to: Identity},
+	Responsible:     {typeName: "RESPONSIBLE", inverse: "responsible-for", from: CI, fromKinds: raciOwnedKinds, to: Identity, toKinds: []NodeKind{Identity, Group}},
+	Consulted:       {typeName: "CONSULTED", inverse: "consulted-on", from: CI, fromKinds: raciOwnedKinds, to: Identity, toKinds: []NodeKind{Identity, Group}},
+	Informed:        {typeName: "INFORMED", inverse: "informed-of", from: CI, fromKinds: raciOwnedKinds, to: Identity, toKinds: []NodeKind{Identity, Group}},
+	DevelopedBy:     {typeName: "DEVELOPED_BY", inverse: "developer-of", from: CI, to: Identity, fromCITypes: []CIType{Automation}},
 }
 
 // raciOwnedKinds are the record kinds that carry RACI ownership.
@@ -445,12 +445,14 @@ type Node struct {
 	Status        string         `json:"status"`
 	RetiredAt     string         `json:"retiredAt,omitempty"`
 	Relationships []Relationship `json:"relationships,omitempty"`
+	// OLA is set on case records that are measured against an operational level agreement.
+	OLA *AgreementClock `json:"ola,omitempty"`
 }
 
 type Relationship struct {
-	Kind       RelationshipKind `json:"kind"`
-	FromID     string           `json:"fromId"`
-	ToID       string           `json:"toId"`
+	Kind   RelationshipKind `json:"kind"`
+	FromID string           `json:"fromId"`
+	ToID   string           `json:"toId"`
 	// FromName and ToName are the endpoints' display names, filled in when a
 	// relationship is listed alongside a node so people are shown names, not IDs.
 	FromName   string         `json:"fromName,omitempty"`
@@ -636,18 +638,18 @@ func ExecutionModelNames() []string {
 type TriggerAction string
 
 const (
-	TriggerEmailReceived      TriggerAction = "email-received"
-	TriggerFileDelivered      TriggerAction = "file-delivered"
-	TriggerWorkItemQueued     TriggerAction = "work-item-queued"
-	TriggerFormSubmitted      TriggerAction = "form-submitted"
-	TriggerManualStart        TriggerAction = "manual-start"
-	TriggerSchedule           TriggerAction = "schedule"
-	TriggerAlertRaised        TriggerAction = "alert-raised"
-	TriggerApprovalGranted    TriggerAction = "approval-granted"
-	TriggerUpstreamCompleted  TriggerAction = "upstream-completed"
-	TriggerStatusChanged      TriggerAction = "status-changed"
-	TriggerCustomerContact    TriggerAction = "customer-contact"
-	TriggerPaymentReceived    TriggerAction = "payment-received"
+	TriggerEmailReceived     TriggerAction = "email-received"
+	TriggerFileDelivered     TriggerAction = "file-delivered"
+	TriggerWorkItemQueued    TriggerAction = "work-item-queued"
+	TriggerFormSubmitted     TriggerAction = "form-submitted"
+	TriggerManualStart       TriggerAction = "manual-start"
+	TriggerSchedule          TriggerAction = "schedule"
+	TriggerAlertRaised       TriggerAction = "alert-raised"
+	TriggerApprovalGranted   TriggerAction = "approval-granted"
+	TriggerUpstreamCompleted TriggerAction = "upstream-completed"
+	TriggerStatusChanged     TriggerAction = "status-changed"
+	TriggerCustomerContact   TriggerAction = "customer-contact"
+	TriggerPaymentReceived   TriggerAction = "payment-received"
 )
 
 func ParseTriggerAction(value string) (TriggerAction, error) {
@@ -894,19 +896,19 @@ type Assignee struct {
 
 // WorkflowStepDefinition is one step of a workflow as the admin configures it.
 type WorkflowStepDefinition struct {
-	ID             string       `json:"id,omitempty"` // assigned by the server; present when updating an existing step
-	Order          int          `json:"order"`
-	Name           string       `json:"name"`
-	StepType       StepType     `json:"stepType"`
-	Instructions   string       `json:"instructions,omitempty"`
-	ApprovalRule   ApprovalRule `json:"approvalRule,omitempty"` // approval steps only
-	EditableFields []string     `json:"editableFields"`         // request fields the assignees may fill in or change
-	RequiredFields []string     `json:"requiredFields"`         // editable fields that must be present before the step can complete
-	AssigneeIDs      []string     `json:"assigneeIds"`            // identities or groups (input)
-	Assignees        []Assignee   `json:"assignees,omitempty"`    // resolved (output)
-	AssigneeRule     AssigneeRule `json:"assigneeRule,omitempty"` // when set, assignees are worked out per task instead of named here
-	OLAEnabled       bool         `json:"olaEnabled"`
-	OLABusinessDays  int          `json:"olaBusinessDays,omitempty"`
+	ID              string       `json:"id,omitempty"` // assigned by the server; present when updating an existing step
+	Order           int          `json:"order"`
+	Name            string       `json:"name"`
+	StepType        StepType     `json:"stepType"`
+	Instructions    string       `json:"instructions,omitempty"`
+	ApprovalRule    ApprovalRule `json:"approvalRule,omitempty"` // approval steps only
+	EditableFields  []string     `json:"editableFields"`         // request fields the assignees may fill in or change
+	RequiredFields  []string     `json:"requiredFields"`         // editable fields that must be present before the step can complete
+	AssigneeIDs     []string     `json:"assigneeIds"`            // identities or groups (input)
+	Assignees       []Assignee   `json:"assignees,omitempty"`    // resolved (output)
+	AssigneeRule    AssigneeRule `json:"assigneeRule,omitempty"` // when set, assignees are worked out per task instead of named here
+	OLAEnabled      bool         `json:"olaEnabled"`
+	OLABusinessDays int          `json:"olaBusinessDays,omitempty"`
 }
 
 // AssigneeRule picks a task's assignees at run time. The access workflow's
@@ -943,22 +945,22 @@ type TaskActionRecord struct {
 // step it mirrors, the run and workflow it belongs to, the request under
 // review, who may act, and what has been done so far.
 type TaskView struct {
-	ID            string                 `json:"id"`
-	Status        TaskStatus             `json:"status"`
-	CreatedAt     string                 `json:"createdAt,omitempty"`
-	CompletedAt   string                 `json:"completedAt,omitempty"`
-	RetiredAt     string                 `json:"retiredAt,omitempty"` // set once the task record is retired (its run completed, or it was retired by hand)
-	Step          WorkflowStepDefinition `json:"step"`
-	FinalStep     bool                   `json:"finalStep"` // completing this task fulfils the request
-	RunID         string                 `json:"runId"`
-	RunStatus     RunStatus              `json:"runStatus"`
-	WorkflowID    string                 `json:"workflowId"`
-	WorkflowName  string                 `json:"workflowName"`
-	Request       Node                   `json:"request"`
-	Requester     *Assignee              `json:"requester,omitempty"`
-	Assignees     []Assignee             `json:"assignees"`
-	EligibleActors []Assignee            `json:"eligibleActors"` // identities who may act: direct assignees plus group members
-	Actions       []TaskActionRecord     `json:"actions"`
+	ID             string                 `json:"id"`
+	Status         TaskStatus             `json:"status"`
+	CreatedAt      string                 `json:"createdAt,omitempty"`
+	CompletedAt    string                 `json:"completedAt,omitempty"`
+	RetiredAt      string                 `json:"retiredAt,omitempty"` // set once the task record is retired (its run completed, or it was retired by hand)
+	Step           WorkflowStepDefinition `json:"step"`
+	FinalStep      bool                   `json:"finalStep"` // completing this task fulfils the request
+	RunID          string                 `json:"runId"`
+	RunStatus      RunStatus              `json:"runStatus"`
+	WorkflowID     string                 `json:"workflowId"`
+	WorkflowName   string                 `json:"workflowName"`
+	Request        Node                   `json:"request"`
+	Requester      *Assignee              `json:"requester,omitempty"`
+	Assignees      []Assignee             `json:"assignees"`
+	EligibleActors []Assignee             `json:"eligibleActors"` // identities who may act: direct assignees plus group members
+	Actions        []TaskActionRecord     `json:"actions"`
 	// Access requests: who the access is for, the item this task decides or
 	// provisions, and every item on the request with where it has got to.
 	RequestedFor *Assignee        `json:"requestedFor,omitempty"`
@@ -1084,7 +1086,7 @@ type TaskFilter struct {
 // TaskOutcome is what the store applies once the service has decided the
 // effect of an action on a pending task.
 type TaskOutcome struct {
-	Action       TaskStatus     // what the actor did: completed, approved, or rejected
+	Action       TaskStatus // what the actor did: completed, approved, or rejected
 	Comment      string
 	Properties   map[string]any // validated request updates to apply
 	Advance      bool           // the task is done; move the run to the next step (or finish it)

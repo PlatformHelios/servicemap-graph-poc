@@ -37,6 +37,11 @@ type nodeRequest struct {
 	ID         string         `json:"id,omitempty"`
 	Properties map[string]any `json:"properties"`
 	CIIDs      []string       `json:"ciIds,omitempty"`
+	Status     string         `json:"status,omitempty"`
+}
+
+type publishDraftsRequest struct {
+	Objects []cmdb.DraftRef `json:"objects"`
 }
 
 type propertiesRequest struct {
@@ -112,6 +117,9 @@ func NewHandlerWithLogger(service *cmdb.Service, logger *slog.Logger) http.Handl
 	mux.HandleFunc("GET /api/capabilities", api.capabilities)
 	mux.HandleFunc("GET /api/process-maps/{processId}", api.getProcessMap)
 	mux.HandleFunc("PUT /api/process-maps/{processId}", api.saveProcessMap)
+	mux.HandleFunc("GET /api/draft-packages", api.listDraftPackages)
+	mux.HandleFunc("POST /api/drafts/publish", api.publishDrafts)
+	mux.HandleFunc("DELETE /api/drafts/{kind}/{id}", api.deleteDraft)
 	// Service Catalog: items published by the teams that automate them, and
 	// requests raised from them.
 	mux.HandleFunc("GET /api/catalog-items", api.listCatalogItems)
@@ -597,7 +605,15 @@ func (h *handler) createNode(w http.ResponseWriter, r *http.Request) {
 	if !h.authorizeNodeWrite(w, access, kind, "create", request.Properties) {
 		return
 	}
-	node, err := h.service.CreateGeneratedNode(r.Context(), kind, request.Properties, request.CIIDs)
+	ctx := r.Context()
+	if strings.TrimSpace(request.Status) != "" && request.Status != "active" && request.Status != "draft" {
+		writeError(w, http.StatusBadRequest, "status must be active or draft")
+		return
+	}
+	if request.Status == "draft" {
+		ctx = cmdb.WithNodeStatus(ctx, "draft")
+	}
+	node, err := h.service.CreateGeneratedNode(ctx, kind, request.Properties, request.CIIDs)
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -878,7 +894,73 @@ func parseListOptions(r *http.Request) (cmdb.ListOptions, error) {
 	if err != nil {
 		return cmdb.ListOptions{}, err
 	}
-	return cmdb.ListOptions{IncludeRetired: includeRetired, Limit: limit, Offset: offset, Query: r.URL.Query().Get("q"), InvolvedID: r.URL.Query().Get("involvedId"), RequestType: cmdb.RequestType(strings.TrimSpace(r.URL.Query().Get("requestType")))}, nil
+	includeDraft := false
+	if value := r.URL.Query().Get("includeDraft"); value != "" {
+		includeDraft, err = strconv.ParseBool(value)
+		if err != nil {
+			return cmdb.ListOptions{}, errors.New("includeDraft must be true or false")
+		}
+	}
+	return cmdb.ListOptions{IncludeRetired: includeRetired, IncludeDraft: includeDraft, Limit: limit, Offset: offset, Query: r.URL.Query().Get("q"), InvolvedID: r.URL.Query().Get("involvedId"), RequestType: cmdb.RequestType(strings.TrimSpace(r.URL.Query().Get("requestType")))}, nil
+}
+
+func (h *handler) requireSuperAdmin(w http.ResponseWriter, r *http.Request) (*cmdb.ActorAccess, bool) {
+	access, ok := h.requireActor(w, r)
+	if !ok {
+		return nil, false
+	}
+	if !access.SuperAdmin {
+		writeError(w, http.StatusForbidden, "only the platform super admin can review draft packages")
+		return nil, false
+	}
+	return access, true
+}
+
+func (h *handler) listDraftPackages(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireSuperAdmin(w, r); !ok {
+		return
+	}
+	packages, err := h.service.ListDraftPackages(r.Context())
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	if packages == nil {
+		packages = []cmdb.DraftPackage{}
+	}
+	writeJSON(w, http.StatusOK, packages)
+}
+
+func (h *handler) publishDrafts(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireSuperAdmin(w, r); !ok {
+		return
+	}
+	request, err := decodeJSON[publishDraftsRequest](w, r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := h.service.PublishDrafts(r.Context(), request.Objects); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "active"})
+}
+
+func (h *handler) deleteDraft(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireSuperAdmin(w, r); !ok {
+		return
+	}
+	kind, err := cmdb.ParseNodeKind(r.PathValue("kind"))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	if err := h.service.DeleteDraftNode(r.Context(), kind, r.PathValue("id")); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func decodeJSON[T any](w http.ResponseWriter, r *http.Request) (T, error) {
