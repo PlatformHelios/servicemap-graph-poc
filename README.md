@@ -529,6 +529,19 @@ go test ./...
 
 The Neo4j retirement integration test is skipped unless `NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`, and `NEO4J_TEST_DATABASE` are set. It creates uniquely named records in that database and leaves them retired, so configure a dedicated test database rather than a production database.
 
+Lint the Go code with [golangci-lint](https://golangci-lint.run/welcome/install/) v2 (configured in `.golangci.yml`), and lint, type-check, and test the dashboard from `web/`:
+
+```powershell
+go vet ./...
+golangci-lint run
+cd web
+npm run lint
+npm run typecheck
+npm test
+```
+
+The `CI` workflow (`.github/workflows/ci.yml`) runs all of these on every pull request and push to `main`.
+
 ## Performance tests
 
 [k6](https://k6.io/docs/get-started/installation/) tests live in `perf/`. `perf/smoke.js` ramps 10 virtual users over read-only API endpoints and fails if more than 1% of requests fail or p95 latency exceeds 500 ms. Start the server, then run:

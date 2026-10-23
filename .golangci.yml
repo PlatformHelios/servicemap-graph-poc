@@ -1,0 +1,12 @@
+version: "2"
+
+linters:
+  # The default set: errcheck, govet, ineffassign, staticcheck, unused.
+  default: standard
+  settings:
+    errcheck:
+      # Deferred Close on response bodies, Neo4j sessions, and the graph store.
+      exclude-functions:
+        - (io.Closer).Close
+        - (github.com/neo4j/neo4j-go-driver/v5/neo4j.SessionWithContext).Close
+        - (*github.com/PlatformHelios/servicemap-graph-poc/internal/graph.Store).Close

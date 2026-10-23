@@ -127,7 +127,7 @@ func Build(item Item) (Manifest, error) {
 func functionName(fn any) (string, error) {
 	value := reflect.ValueOf(fn)
 	if value.Kind() != reflect.Func {
-		return "", fmt.Errorf("Workflow must be a function, not %T", fn)
+		return "", fmt.Errorf("Workflow must be a function, not %T", fn) //nolint:staticcheck // names the Workflow field
 	}
 	full := runtime.FuncForPC(value.Pointer()).Name()
 	name := full[strings.LastIndex(full, ".")+1:]
