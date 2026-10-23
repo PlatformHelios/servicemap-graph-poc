@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Search, Settings, X } from "lucide-react";
+import { Plus, Search, Settings, X } from "lucide-react";
 import { nodeDisplayName } from "./api";
 import type { GraphNode } from "./types";
 
@@ -23,7 +23,7 @@ export function pickerSubtitle(node: GraphNode) {
   const kind = node.kind === "ci" ? String(node.properties?.ciType ?? "ci") : node.kind;
   return `${node.id} · ${titleCase(kind)}`;
 }
-export default function RecordPicker({ id, label, hint, placeholder, options, selected, single, readOnly, onChange }: { id: string; label: string; hint?: string; placeholder: string; options: GraphNode[]; selected: string[]; single?: boolean; readOnly?: boolean; onChange: (ids: string[]) => void }) {
+export default function RecordPicker({ id, label, hint, placeholder, options, selected, single, readOnly, onChange, onCreate, createLabel }: { id: string; label: string; hint?: string; placeholder: string; options: GraphNode[]; selected: string[]; single?: boolean; readOnly?: boolean; onChange: (ids: string[]) => void; onCreate?: () => void; createLabel?: string }) {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const term = query.trim().toLowerCase();
@@ -56,7 +56,10 @@ export default function RecordPicker({ id, label, hint, placeholder, options, se
       {!readOnly && <button type="button" aria-label={`Remove ${nodeDisplayName(node) ?? node.id} from ${label}`} onClick={() => onChange(selected.filter((value) => value !== node.id))}><X size={13} /></button>}
     </li>)}</ul>}
     {canAdd && <div className="raci-finder" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false); }}>
-      <label className="search-box raci-search"><Search aria-hidden="true" size={15} /><input id={id} value={query} type="search" autoComplete="off" role="combobox" aria-expanded={open && term.length > 0} aria-controls={`${id}-matches`} placeholder={placeholder} onChange={(event) => { setQuery(event.target.value); setOpen(true); }} onFocus={() => setOpen(true)} onKeyDown={onKeyDown} /></label>
+      <div className="raci-finder-row">
+        <label className="search-box raci-search"><Search aria-hidden="true" size={15} /><input id={id} value={query} type="search" autoComplete="off" role="combobox" aria-expanded={open && term.length > 0} aria-controls={`${id}-matches`} placeholder={placeholder} onChange={(event) => { setQuery(event.target.value); setOpen(true); }} onFocus={() => setOpen(true)} onKeyDown={onKeyDown} /></label>
+        {onCreate && !readOnly && <button className="button button-quiet icon-button picker-create" type="button" aria-label={createLabel ?? `Create ${label}`} title={createLabel ?? `Create ${label}`} onMouseDown={(event) => event.preventDefault()} onClick={onCreate}><Plus size={14} /></button>}
+      </div>
       {open && term && <ul className="raci-matches" id={`${id}-matches`} role="listbox">
         {matches.length === 0
           ? <li className="raci-no-match">No active records match “{query.trim()}”.</li>

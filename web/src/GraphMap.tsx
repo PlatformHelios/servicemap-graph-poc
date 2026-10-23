@@ -26,7 +26,7 @@ interface MapNodeData extends Record<string, unknown> {
   label: string;
   kind: NodeKind;
   ciType?: string;
-  status: "active" | "retired";
+  status: "active" | "retired" | "draft";
   detail: string;
   selected: boolean;
   dimmed: boolean; // true when another record is selected and this one is not linked to it
@@ -105,7 +105,7 @@ const kindTones: Record<NodeKind, string> = {
   group: "slate",
   ci: "blue",
   incident: "red",
-  case: "red",
+  case: "purple",
   change: "yellow",
   event: "green",
   request: "slate",
@@ -181,7 +181,83 @@ function downCIIds(nodes: GraphNode[], relationships: GraphRelationship[]): Set<
   return down;
 }
 
+function ciTypeOf(node: GraphNode | undefined) {
+  return node?.kind === "ci" && typeof node.properties?.ciType === "string" ? node.properties.ciType : "";
+}
+
+// Process maps store both the list order (next-in-process) and the wait graph
+// (depends-on, drawn from the step back to what it waits on). Feeding both to
+// dagre makes a cycle, so the routed lines fold back on themselves. Keep the
+// wait graph, draw it in the direction work moves, and drop the list-order
+// chain plus the duplicate process-step link once that flow exists.
+// Selecting a process or one of its steps should show the whole flow, not only
+// the records one hop away. Later steps are reached through depends-on or the
+// list-order chain.
+function processFlowIDs(selectedNodeID: string, nodes: GraphNode[], relationships: GraphRelationship[]) {
+  const byKey = new Map(nodes.map((node) => [nodeID(node), node]));
+  const selected = byKey.get(selectedNodeID);
+  const type = ciTypeOf(selected);
+  if (!selected || (type !== "process" && type !== "process-step")) return [];
+  const steps = new Set<string>();
+  const processes = new Set<string>();
+  if (type === "process") processes.add(selected.id);
+  else steps.add(selected.id);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const add = (bucket: Set<string>, id: string) => {
+      if (!id || bucket.has(id)) return;
+      bucket.add(id);
+      changed = true;
+    };
+    for (const relationship of relationships) {
+      if (relationship.status === "retired") continue;
+      if (relationship.kind === "process-step") {
+        if (processes.has(relationship.fromId)) add(steps, relationship.toId);
+        if (steps.has(relationship.toId)) add(processes, relationship.fromId);
+      }
+      if (relationship.kind === "next-in-process") {
+        if (steps.has(relationship.fromId)) add(steps, relationship.toId);
+        if (steps.has(relationship.toId)) add(steps, relationship.fromId);
+      }
+      if (relationship.kind !== "depends-on") continue;
+      const fromType = ciTypeOf(byKey.get(`ci:${relationship.fromId}`));
+      const toType = ciTypeOf(byKey.get(`ci:${relationship.toId}`));
+      if (fromType !== "process-step") continue;
+      const touches = steps.has(relationship.fromId) || steps.has(relationship.toId) || processes.has(relationship.toId);
+      if (!touches) continue;
+      add(steps, relationship.fromId);
+      if (toType === "process") add(processes, relationship.toId);
+      if (toType === "process-step") add(steps, relationship.toId);
+    }
+  }
+  return [...processes, ...steps].map((id) => `ci:${id}`);
+}
+
+function layoutRelationships(nodes: GraphNode[], relationships: GraphRelationship[]) {
+  const cis = new Map(nodes.filter((node) => node.kind === "ci").map((node) => [node.id, node]));
+  const reversed = new Set<string>();
+  const stepsWithFlow = new Set<string>();
+  const coveredByStart = new Set<string>();
+  for (const relationship of relationships) {
+    if (relationship.kind !== "depends-on" || relationship.status === "retired") continue;
+    const fromType = ciTypeOf(cis.get(relationship.fromId));
+    const toType = ciTypeOf(cis.get(relationship.toId));
+    if (fromType !== "process-step" || (toType !== "process-step" && toType !== "process")) continue;
+    reversed.add(`${relationship.kind}:${relationship.fromId}:${relationship.toId}`);
+    stepsWithFlow.add(relationship.fromId);
+    if (toType === "process") coveredByStart.add(`${relationship.toId}:${relationship.fromId}`);
+  }
+  const visible = relationships.filter((relationship) => {
+    if (relationship.kind === "next-in-process" && (stepsWithFlow.has(relationship.fromId) || stepsWithFlow.has(relationship.toId))) return false;
+    if (relationship.kind === "process-step" && coveredByStart.has(`${relationship.fromId}:${relationship.toId}`)) return false;
+    return true;
+  });
+  return { visible, reversed };
+}
+
 function layoutGraph(nodes: GraphNode[], relationships: GraphRelationship[], definitions: Metadata["relationships"], selectedNodeID: string | null, anomalyIdentityIDs: Set<string>, downIDs: Set<string>, onSelect: (id: string) => void) {
+  const display = layoutRelationships(nodes, relationships);
   const known = new Map(nodes.map((node) => [nodeID(node), node]));
   const definitionByKind = new Map(definitions.map((definition) => [definition.kind, definition]));
   // A multigraph keeps two relationships between the same pair of records as
@@ -215,30 +291,37 @@ function layoutGraph(nodes: GraphNode[], relationships: GraphRelationship[], def
   const flowEdges: MapFlowEdge[] = [];
   // Records directly linked to the selected one stay at full strength; every
   // other node and edge dims so the selected record's connections stand out.
+  // A selected process keeps its whole step flow at full strength too.
+  const flowMembers = new Set(selectedNodeID ? processFlowIDs(selectedNodeID, nodes, relationships) : []);
   const neighbourIDs = new Set<string>();
-  for (const relationship of relationships) {
+  for (const relationship of display.visible) {
     const definition = definitionByKind.get(relationship.kind);
     if (!definition) continue;
-    const source = relationshipSourceKey(definition, relationship.fromId, nodes);
-    const target = relationshipTargetKey(definition, relationship.toId, nodes);
+    const storedSource = relationshipSourceKey(definition, relationship.fromId, nodes);
+    const storedTarget = relationshipTargetKey(definition, relationship.toId, nodes);
+    const flip = display.reversed.has(`${relationship.kind}:${relationship.fromId}:${relationship.toId}`);
+    const source = flip ? storedTarget : storedSource;
+    const target = flip ? storedSource : storedTarget;
     if (!known.has(source) || !known.has(target)) continue;
     const id = `${relationship.kind}:${source}:${target}`;
     // Label the edge from the selected node's perspective: forward when it is the
     // source (downstream), inverse when it is the target (upstream). Unselected
     // edges keep the forward label.
     const touchesSelected = selectedNodeID !== null && (source === selectedNodeID || target === selectedNodeID);
-    if (touchesSelected) {
+    const inSelectedFlow = flowMembers.has(selectedNodeID ?? "") && flowMembers.has(source) && flowMembers.has(target);
+    if (touchesSelected || inSelectedFlow) {
       neighbourIDs.add(source);
       neighbourIDs.add(target);
     }
-    const dimmed = selectedNodeID !== null && !touchesSelected;
+    const linked = touchesSelected || inSelectedFlow;
+    const dimmed = selectedNodeID !== null && !linked;
     const viewedFromSource = !touchesSelected || source === selectedNodeID;
-    const label = relationshipLabel(relationship, viewedFromSource, definitions);
+    const label = relationshipLabel(relationship, flip ? !viewedFromSource : viewedFromSource, definitions);
     // Reserve room for whichever reading is longer so selecting a record (which
     // flips some labels to their inverse) does not reshuffle the layout.
-    const longestLabel = Math.max(label.length, relationshipLabel(relationship, !viewedFromSource, definitions).length);
+    const longestLabel = Math.max(label.length, relationshipLabel(relationship, flip ? viewedFromSource : !viewedFromSource, definitions).length);
     dagreGraph.setEdge(source, target, { width: longestLabel * labelCharWidth + labelPadding, height: labelHeight, labelpos: "c" }, id);
-    const strokeColor = relationship.status === "retired" ? "#a5b0bf" : touchesSelected ? "#174d8a" : "#2871ba";
+    const strokeColor = relationship.status === "retired" ? "#a5b0bf" : linked ? "#174d8a" : "#2871ba";
     const arrow = { type: MarkerType.ArrowClosed, color: strokeColor };
     flowEdges.push({
       id,
@@ -246,13 +329,13 @@ function layoutGraph(nodes: GraphNode[], relationships: GraphRelationship[], def
       target,
       type: "mapLink",
       className: dimmed ? "map-edge-dimmed" : undefined,
-      data: { label, waypoints: [], labelX: 0, labelY: 0, linked: touchesSelected, dimmed, retired: relationship.status === "retired" },
+      data: { label, waypoints: [], labelX: 0, labelY: 0, linked, dimmed, retired: relationship.status === "retired" },
       // The arrow points away from the viewed node: forward edges point at the
       // target; when the selected node is the target, the inverse reading points
       // back at the source instead.
       markerEnd: viewedFromSource ? arrow : undefined,
       markerStart: viewedFromSource ? undefined : arrow,
-      style: { stroke: strokeColor, strokeWidth: touchesSelected ? 2.2 : 1.7 },
+      style: { stroke: strokeColor, strokeWidth: linked ? 2.2 : 1.7 },
       animated: false,
     });
   }
@@ -286,8 +369,10 @@ function MapLinkEdge({ id, sourceX, sourceY, targetX, targetY, data, style, mark
   for (let index = 1; index < points.length; index += 1) {
     const from = points[index - 1];
     const to = points[index];
-    const pull = Math.max(Math.abs(to.x - from.x) / 2, 28);
-    path += ` C ${from.x + pull} ${from.y}, ${to.x - pull} ${to.y}, ${to.x} ${to.y}`;
+    const dx = to.x - from.x;
+    const pull = Math.max(Math.abs(dx) / 2, 24);
+    const direction = dx >= 0 ? 1 : -1;
+    path += ` C ${from.x + pull * direction} ${from.y}, ${to.x - pull * direction} ${to.y}, ${to.x} ${to.y}`;
   }
   const labelClass = ["map-edge-label", data?.linked ? "map-edge-label-linked" : "", data?.dimmed ? "map-edge-label-dimmed" : "", data?.retired ? "map-edge-label-retired" : ""].filter(Boolean).join(" ");
   return <>
@@ -455,10 +540,13 @@ function SelectedNodePanel({ node, upstream, downstream, definitions, hasAnomaly
   </aside>;
 }
 
-export default function GraphMap({ metadata, includeRetired, reload, onToggleIncludeRetired, onCreateLinked, onEdit, onOpenProcessMapper }: {
+export default function GraphMap({ metadata, includeRetired, reload, focus, onFocusApplied, onToggleIncludeRetired, onCreateLinked, onEdit, onOpenProcessMapper }: {
   metadata: Metadata | null;
   includeRetired: boolean;
   reload: number;
+  /** Open the map with this incident or case selected. */
+  focus?: { kind: NodeKind; id: string } | null;
+  onFocusApplied?: () => void;
   onToggleIncludeRetired: () => void;
   onCreateLinked?: (kind: LinkedRecordKind, ci: GraphNode) => void;
   onOpenProcessMapper?: (process: GraphNode) => void;
@@ -511,6 +599,18 @@ export default function GraphMap({ metadata, includeRetired, reload, onToggleInc
     return () => { cancelled = true; };
   }, [metadata, includeRetired, reload]);
 
+  useEffect(() => {
+    if (!focus || loading) return;
+    const match = nodes.find((node) => node.kind === focus.kind && node.id === focus.id);
+    if (!match) return;
+    setKindFilter(match.kind);
+    setCITypeFilter("all");
+    setSearch("");
+    setDownOnly(false);
+    setSelectedNodeID(nodeID(match));
+    onFocusApplied?.();
+  }, [focus, loading, nodes, onFocusApplied]);
+
   const query = search.trim().toLowerCase();
   const filtersCIs = kindFilter === "all" || kindFilter === "ci";
   const matchedNodes = nodes.filter((node) => {
@@ -538,6 +638,7 @@ export default function GraphMap({ metadata, includeRetired, reload, onToggleInc
       if (fromID === selectedNodeID) visibleIDs.add(toID);
       else if (toID === selectedNodeID) visibleIDs.add(fromID);
     }
+    for (const id of processFlowIDs(selectedNodeID, nodes, relationships)) visibleIDs.add(id);
   }
   const filteredNodes = nodes.filter((node) => visibleIDs.has(nodeID(node)));
   const filteredRelationships = relationships.filter((relationship) => {
@@ -587,7 +688,7 @@ export default function GraphMap({ metadata, includeRetired, reload, onToggleInc
           <MiniMap nodeColor={(node) => {
             const data = node.data as MapNodeData;
             if (data.down) return "#c0392b";
-            return kindTones[data.kind] === "yellow" ? "#f2c84b" : kindTones[data.kind] === "red" ? "#d9685f" : kindTones[data.kind] === "green" ? "#59a779" : "#2871ba";
+            return kindTones[data.kind] === "yellow" ? "#f2c84b" : kindTones[data.kind] === "red" ? "#d9685f" : kindTones[data.kind] === "purple" ? "#7a5cad" : kindTones[data.kind] === "green" ? "#59a779" : "#2871ba";
           }} maskColor="rgba(244,247,250,0.72)" />
           <Controls showInteractive={false} />
         </ReactFlow>
@@ -609,7 +710,7 @@ export default function GraphMap({ metadata, includeRetired, reload, onToggleInc
     <div className="map-legend" aria-label="Map legend">
       <span><i className="legend-swatch ci" />CI</span>
       <span><i className="legend-swatch incident" />Incident</span>
-      <span><i className="legend-swatch incident" />Case</span>
+      <span><i className="legend-swatch case" />Case</span>
       <span><i className="legend-swatch change" />Change</span>
       <span><i className="legend-swatch event" />Event</span>
       <span className="map-legend-down"><ArrowDown size={12} strokeWidth={2.6} aria-hidden="true" />Node down</span>

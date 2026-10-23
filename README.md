@@ -421,8 +421,9 @@ Every relationship is stored once, in its forward direction, and has a paired in
 
 **CMDB → Process Mapper** documents how a Process CI runs. Pick an existing process or type a new name, then **Save map** (or **Create & save map**) writes the Process CI if needed plus triggers, ordered Process Step CIs, performers, and outcomes. Steps and performers are graph relationships, so Graph Map shows the same structure.
 
-- Steps are Process Step CIs (`execution` `manual` or `automated`). The Process links `process-step` only to the first step; later steps use `next-in-process`. Canvas `x`/`y` live on each step CI.
-- Start and outputs are action catalogs on the Process CI (`triggerActions` / `outputActions`, plus optional descriptions). `GET /api/meta` publishes the allowed values.
+- Steps are Process Step CIs (`execution` `manual` or `automated`). A newly created step is draft until a super admin publishes it, including a step added to a process that is already active. Steps that are already active stay active. The Process links `process-step` only to the first step; later steps use `next-in-process` to keep list order. Canvas `x`/`y` live on each step CI.
+- Each step can depend on Process Start, on one or more earlier steps, or on both. Steps that depend only on Process Start begin together when the process starts. A later step that depends on several earlier steps waits for all of them, which is how the map forks and joins. Those choices are stored as `depends-on` (inverse `depended-on-by`). The canvas draws an arrow from the thing a step waits on to the step itself.
+- Start and outputs keep the action catalogs (`triggerActions` / `outputActions`) and can also name configuration items. Trigger CIs are stored as `triggered-by` (application, process, function, or service). Output CIs are stored as `produces`.
 - Manual steps are performed by people, groups, or applications. Automated steps are performed only by Automation CIs and cannot allow case creation.
 - **Allow case creation** lets a case be raised for that step. The case copies the step OLA and is assigned to the step's identity and group performers.
 - `GET` / `PUT /api/process-maps/{processId}` load and save the map. Open it from CMDB, a Process CI, or Graph Map.

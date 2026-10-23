@@ -1,13 +1,13 @@
 import { useEffect, useState } from "react";
 import { ClipboardList, ChevronLeft, ChevronRight, UserRound } from "lucide-react";
-import { getAccessOptions, getHolidays, getNodePage, getTasks, nodeDisplayName, saveHolidays } from "./api";
+import { deleteDraft, getAccessOptions, getDraftPackages, getHolidays, getNodePage, getTasks, nodeDisplayName, publishDrafts, saveHolidays, type DraftObject, type DraftPackage } from "./api";
 import { AgreementMeter } from "./AgreementMeter";
 import { defaultPageSize } from "./Pager";
 import { titleCase } from "./RecordPicker";
 import { TaskDialog } from "./WorkflowTasks";
 import { formatWhen, requestStateOf, requestStatePillClass, requestTypeOf, taskStatusPillClass, formTitles } from "./workflows";
 import { superAdmin, type SessionUser } from "./session";
-import type { AccessHolding, GraphNode, Holiday, Metadata, TaskView } from "./types";
+import type { AccessHolding, GraphNode, Holiday, Metadata, NodeKind, TaskView } from "./types";
 
 // The signed-in user's landing page: who they are and the work waiting on
 // them. The super admin, acting as themselves, sees every open task and
@@ -20,13 +20,14 @@ const heldVia: Record<AccessHolding["via"], string> = {
   pending: "requested",
 };
 
-export default function Home({ user, metadata, reload, onNotify, onOpenRequest, onOpenTasks }: {
+export default function Home({ user, metadata, reload, onNotify, onOpenRequest, onOpenTasks, onOpenProcess }: {
   user: SessionUser;
   metadata: Metadata | null;
   reload: number;
   onNotify: (message: string) => void;
   onOpenRequest: (record: GraphNode) => void;
   onOpenTasks: () => void;
+  onOpenProcess?: (processId: string) => void;
 }) {
   const actorId = user.superAdmin ? "" : user.id;
   // The identity record (with its job code, group, and location links) comes with the session.
@@ -126,6 +127,8 @@ export default function Home({ user, metadata, reload, onNotify, onOpenRequest, 
         </form>
       </section>
     </section>
+
+    {user.superAdmin && <DraftPackages reload={reload + listReload} onNotify={onNotify} onOpenProcess={onOpenProcess} />}
 
     <section className="records-section" aria-label="Open requests">
       <div className="ci-picker-heading saved-requests-heading"><div><h3>{user.superAdmin ? "Open requests on the platform" : "Your open requests"}</h3></div><span className="ci-selection-count">{loading ? "" : requestTotal > defaultPageSize ? `showing ${requests.length} of ${requestTotal.toLocaleString()} open` : `${requests.length} open`}</span></div>
@@ -238,5 +241,141 @@ function HolidayCalendar({ onNotify, reload }: { onNotify: (message: string) => 
       })}
     </div>
     {error && <p className="form-error" role="alert">{error}</p>}
+  </section>;
+}
+
+function objectKey(kind: string, id: string) {
+  return `${kind}:${id}`;
+}
+
+function processObject(item: DraftPackage) {
+  return item.processId ? item.objects.find((object) => object.id === item.processId) : undefined;
+}
+
+function childObjects(item: DraftPackage) {
+  return item.processId ? item.objects.filter((object) => object.id !== item.processId) : item.objects;
+}
+
+function DraftPackages({ reload, onNotify, onOpenProcess }: {
+  reload: number;
+  onNotify: (message: string) => void;
+  onOpenProcess?: (processId: string) => void;
+}) {
+  const [packages, setPackages] = useState<DraftPackage[]>([]);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [removed, setRemoved] = useState<string[]>([]);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    getDraftPackages().then((result) => {
+      if (!active) return;
+      setPackages(result);
+      setError("");
+    }).catch((loadError: unknown) => {
+      if (active) setError(loadError instanceof Error ? loadError.message : "Could not load draft packages.");
+    });
+    return () => { active = false; };
+  }, [reload]);
+
+  useEffect(() => {
+    const live = new Set(packages.flatMap((item) => item.objects.map((object) => objectKey(object.kind, object.id))));
+    setSelected((current) => current.filter((key) => live.has(key)));
+    setRemoved((current) => current.filter((key) => live.has(key)));
+  }, [packages]);
+
+  function mapIsChecked(item: DraftPackage) {
+    const process = processObject(item);
+    if (process) return selected.includes(objectKey(process.kind, process.id));
+    const remaining = childObjects(item).filter((object) => !removed.includes(objectKey(object.kind, object.id)));
+    return remaining.length > 0 && remaining.every((object) => selected.includes(objectKey(object.kind, object.id)));
+  }
+  function toggleMap(item: DraftPackage) {
+    const process = processObject(item);
+    const children = childObjects(item);
+    const keys = item.objects.map((object) => objectKey(object.kind, object.id));
+    if (mapIsChecked(item)) {
+      setSelected((current) => current.filter((key) => !keys.includes(key)));
+      return;
+    }
+    const next = [
+      ...(process ? [objectKey(process.kind, process.id)] : []),
+      ...children.filter((object) => !removed.includes(objectKey(object.kind, object.id))).map((object) => objectKey(object.kind, object.id)),
+    ];
+    setSelected((current) => [...new Set([...current.filter((key) => !keys.includes(key)), ...next])]);
+  }
+  function toggleChild(object: DraftObject) {
+    const key = objectKey(object.kind, object.id);
+    if (selected.includes(key)) {
+      setRemoved((current) => current.includes(key) ? current : [...current, key]);
+      setSelected((current) => current.filter((itemKey) => itemKey !== key));
+      return;
+    }
+    setRemoved((current) => current.filter((itemKey) => itemKey !== key));
+    setSelected((current) => current.includes(key) ? current : [...current, key]);
+  }
+  async function publish(objects: { kind: NodeKind; id: string }[]) {
+    setBusy(true);
+    setError("");
+    try {
+      await publishDrafts(objects);
+      onNotify(objects.length === 1 ? "Published 1 draft record." : `Published ${objects.length} draft records.`);
+      setSelected([]);
+      setPackages(await getDraftPackages());
+    } catch (publishError: unknown) {
+      setError(publishError instanceof Error ? publishError.message : "Could not publish drafts.");
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function remove(kind: NodeKind, id: string) {
+    const key = objectKey(kind, id);
+    setBusy(true);
+    setError("");
+    try {
+      await deleteDraft(kind, id);
+      onNotify("Deleted draft record.");
+      setSelected((current) => current.filter((item) => item !== key));
+      setRemoved((current) => current.filter((item) => item !== key));
+      setPackages(await getDraftPackages());
+    } catch (deleteError: unknown) {
+      setError(deleteError instanceof Error ? deleteError.message : "Could not delete draft.");
+    } finally {
+      setBusy(false);
+    }
+  }
+  const chosen = packages.flatMap((item) => item.objects).filter((object) => selected.includes(objectKey(object.kind, object.id)));
+  const draftCount = packages.reduce((total, item) => total + item.objects.length, 0);
+
+  return <section className="records-section draft-packages" aria-labelledby="draft-packages-title">
+    <div className="ci-picker-heading"><div><h3 id="draft-packages-title">Draft packages</h3></div><span className="ci-selection-count">{draftCount} draft</span></div>
+    <p className="field-hint">Check a process map to publish it. That also checks the records still in the map. Uncheck a record to leave it draft, or delete one that should not exist.</p>
+    {error && <p className="form-error" role="alert">{error}</p>}
+    <div className="draft-package-frame">
+      {packages.length === 0 ? <p className="field-hint draft-package-empty">No draft packages.</p> : packages.map((item) => {
+        const process = processObject(item);
+        const children = item.processId ? childObjects(item) : item.objects;
+        return <div className="draft-package" key={item.processId || item.name}>
+          <div className="draft-package-heading">
+            {item.processId ? <label>
+              <input type="checkbox" checked={mapIsChecked(item)} onChange={() => toggleMap(item)} aria-label={`Publish ${item.name}`} />
+              <span><strong>{item.name}</strong><small>{item.processId}{process ? " · Process" : " · Process map"}</small></span>
+            </label> : <div><strong>{item.name}</strong></div>}
+            {item.processId && onOpenProcess && <button type="button" className="button button-quiet" onClick={() => onOpenProcess(item.processId ?? "")}>Open map</button>}
+          </div>
+          {children.length > 0 && <ul className="draft-object-list">
+            {children.map((object) => <li key={objectKey(object.kind, object.id)}>
+              <label>
+                <input type="checkbox" checked={selected.includes(objectKey(object.kind, object.id))} onChange={() => toggleChild(object)} />
+                <span><strong>{object.name || object.id}</strong><small>{object.id}{object.ciType ? ` · ${titleCase(object.ciType)}` : ` · ${titleCase(object.kind)}`}</small></span>
+              </label>
+              <button type="button" className="button button-quiet" disabled={busy} onClick={() => void remove(object.kind, object.id)}>Delete</button>
+            </li>)}
+          </ul>}
+        </div>;
+      })}
+    </div>
+    {chosen.length > 0 && <button type="button" className="button button-primary" disabled={busy} onClick={() => void publish(chosen.map((object) => ({ kind: object.kind, id: object.id })))}>Publish selected</button>}
   </section>;
 }

@@ -16,24 +16,49 @@ type ProcessMap struct {
 	Description        string           `json:"description,omitempty"`
 	TriggerActions     []string         `json:"triggerActions,omitempty"`
 	TriggerDescription string           `json:"triggerDescription,omitempty"`
+	Triggers           []ProcessMapRef  `json:"triggers,omitempty"`
 	OutputActions      []string         `json:"outputActions,omitempty"`
 	OutputDescription  string           `json:"outputDescription,omitempty"`
+	Outputs            []ProcessMapRef  `json:"outputs,omitempty"`
 	Steps              []ProcessMapStep `json:"steps"`
+}
+
+// ProcessMapRef is a CI linked as what starts a process (triggered-by) or what it produces.
+type ProcessMapRef struct {
+	Kind string `json:"kind"` // ci
+	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
 }
 
 // ProcessMapStep is one Process Step CI in the map.
 type ProcessMapStep struct {
-	ID               string                `json:"id,omitempty"`
-	Name             string                `json:"name"`
-	Description      string                `json:"description,omitempty"`
-	Execution        string                `json:"execution"` // manual | automated
-	CreatesCase      bool                  `json:"createsCase,omitempty"`
-	OLAEnabled       bool                  `json:"olaEnabled,omitempty"`
-	OLABusinessDays  int                   `json:"olaBusinessDays,omitempty"`
-	Order            int                   `json:"order"`
-	X                float64               `json:"x,omitempty"`
-	Y                float64               `json:"y,omitempty"`
-	Performers       []ProcessMapPerformer `json:"performers,omitempty"`
+	ID              string                `json:"id,omitempty"`
+	Name            string                `json:"name"`
+	Description     string                `json:"description,omitempty"`
+	Execution       string                `json:"execution"` // manual | automated
+	CreatesCase     bool                  `json:"createsCase,omitempty"`
+	OLAEnabled      bool                  `json:"olaEnabled,omitempty"`
+	OLABusinessDays int                   `json:"olaBusinessDays,omitempty"`
+	Order           int                   `json:"order"`
+	X               float64               `json:"x,omitempty"`
+	Y               float64               `json:"y,omitempty"`
+	Performers      []ProcessMapPerformer `json:"performers,omitempty"`
+	// DependsOn is what must finish before this step starts. kind process-start
+	// waits on the process itself; kind step waits on an earlier step in this map.
+	// Several steps waiting only on process start run concurrently. A step may
+	// wait on more than one of these. Stored as depends-on.
+	DependsOn []ProcessMapDependency `json:"dependsOn,omitempty"`
+}
+
+// Process start is the dependency target for steps that begin when the process starts.
+const processStartDependency = "process-start"
+
+// ProcessMapDependency is one thing a step waits on.
+type ProcessMapDependency struct {
+	Kind  string `json:"kind"` // process-start | step
+	ID    string `json:"id,omitempty"`
+	Order int    `json:"order,omitempty"`
+	Name  string `json:"name,omitempty"`
 }
 
 // ProcessMapPerformer is who/what performs a step: identity, group, application, or automation.
@@ -73,6 +98,7 @@ func (s *Service) SaveProcessMap(ctx context.Context, processID string, input Pr
 	if err := requireProcessCI(process); err != nil {
 		return nil, err
 	}
+	input.ProcessID = processID
 	clean, err := validateProcessMapInput(input)
 	if err != nil {
 		return nil, err
@@ -117,7 +143,9 @@ func (s *Service) SaveProcessMap(ctx context.Context, processID string, input Pr
 		}
 		if stepID == "" {
 			props["ciType"] = string(ProcessStepCI)
-			created, err := s.CreateGeneratedNode(ctx, CI, props, nil)
+			// A new step has not been approved yet, even when it is added to a
+			// process that is already active. The super admin publishes it later.
+			created, err := s.CreateGeneratedNode(WithNodeStatus(ctx, "draft"), CI, props, nil)
 			if err != nil {
 				return nil, fmt.Errorf("step %d: %w", i+1, err)
 			}
@@ -138,6 +166,19 @@ func (s *Service) SaveProcessMap(ctx context.Context, processID string, input Pr
 			return nil, err
 		}
 		savedStepIDs = append(savedStepIDs, stepID)
+		clean.Steps[i].ID = stepID
+	}
+	for i := range clean.Steps {
+		for j := range clean.Steps[i].DependsOn {
+			dep := &clean.Steps[i].DependsOn[j]
+			if dep.Kind != "step" || dep.ID != "" {
+				continue
+			}
+			if dep.Order < 1 || dep.Order > len(savedStepIDs) {
+				return nil, fmt.Errorf("%w: step %d depends on a step that is not in this map", ErrInvalid, i+1)
+			}
+			dep.ID = savedStepIDs[dep.Order-1]
+		}
 	}
 
 	headID := ""
@@ -175,6 +216,15 @@ func (s *Service) SaveProcessMap(ctx context.Context, processID string, input Pr
 	if err := s.reconcileNextInProcess(ctx, current.Steps, savedStepIDs); err != nil {
 		return nil, err
 	}
+	if err := s.reconcileStepDependencies(ctx, processID, current.Steps, clean.Steps); err != nil {
+		return nil, err
+	}
+	if err := s.reconcileProcessRefs(ctx, processID, TriggeredBy, clean.Triggers); err != nil {
+		return nil, err
+	}
+	if err := s.reconcileProcessRefs(ctx, processID, Produces, clean.Outputs); err != nil {
+		return nil, err
+	}
 
 	return s.GetProcessMap(ctx, processID)
 }
@@ -194,6 +244,8 @@ func (s *Service) assembleProcessMap(ctx context.Context, process *Node) (*Proce
 		TriggerDescription: propertyString(process.Properties, "triggerDescription"),
 		OutputActions:      propertyStringList(process.Properties, "outputActions"),
 		OutputDescription:  propertyString(process.Properties, "outputDescription"),
+		Triggers:           s.refsFromProcess(ctx, process, TriggeredBy),
+		Outputs:            s.refsFromProcess(ctx, process, Produces),
 		Steps:              []ProcessMapStep{},
 	}
 	var heads []processStepHead
@@ -228,6 +280,7 @@ func (s *Service) assembleProcessMap(ctx context.Context, process *Node) (*Proce
 		return nil, err
 	}
 
+	stepNodes := make([]*Node, 0, len(orderedIDs))
 	for i, stepID := range orderedIDs {
 		stepNode, err := s.store.GetNode(ctx, CI, stepID, false)
 		if err != nil {
@@ -238,7 +291,11 @@ func (s *Service) assembleProcessMap(ctx context.Context, process *Node) (*Proce
 		if err != nil {
 			return nil, err
 		}
+		stepNodes = append(stepNodes, stepNode)
 		result.Steps = append(result.Steps, step)
+	}
+	for i := range result.Steps {
+		result.Steps[i].DependsOn = dependenciesForStep(process.ID, stepNodes[i], result.Steps)
 	}
 	return result, nil
 }
@@ -446,6 +503,84 @@ func (s *Service) reconcileStepPerformers(ctx context.Context, stepID string, pe
 	return nil
 }
 
+func (s *Service) reconcileProcessRefs(ctx context.Context, processID string, kind RelationshipKind, refs []ProcessMapRef) error {
+	want := map[string]bool{}
+	for _, ref := range refs {
+		want[ref.ID] = true
+	}
+	process, err := s.store.GetNode(ctx, CI, processID, false)
+	if err != nil {
+		return err
+	}
+	have := map[string]bool{}
+	for _, rel := range process.Relationships {
+		if rel.Status != "active" || rel.Kind != kind || rel.FromID != processID {
+			continue
+		}
+		have[rel.ToID] = true
+		if want[rel.ToID] {
+			continue
+		}
+		if _, err := s.RetireRelationship(ctx, kind, processID, rel.ToID); err != nil && !errors.Is(err, ErrNotFound) {
+			return err
+		}
+	}
+	for id := range want {
+		if have[id] {
+			continue
+		}
+		if _, err := s.CreateRelationship(ctx, kind, processID, id, nil); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) refsFromProcess(ctx context.Context, process *Node, kind RelationshipKind) []ProcessMapRef {
+	refs := []ProcessMapRef{}
+	for _, rel := range process.Relationships {
+		if rel.Status != "active" || rel.Kind != kind || rel.FromID != process.ID {
+			continue
+		}
+		name := rel.ToName
+		if target, err := s.store.GetNode(ctx, CI, rel.ToID, false); err == nil {
+			if stored := propertyString(target.Properties, "name"); stored != "" {
+				name = stored
+			}
+		}
+		refs = append(refs, ProcessMapRef{Kind: string(CI), ID: rel.ToID, Name: name})
+	}
+	sort.Slice(refs, func(i, j int) bool { return refs[i].ID < refs[j].ID })
+	return refs
+}
+
+func cleanMapRefs(refs []ProcessMapRef, processID string) ([]ProcessMapRef, error) {
+	seen := map[string]bool{}
+	clean := make([]ProcessMapRef, 0, len(refs))
+	for _, ref := range refs {
+		id := strings.TrimSpace(ref.ID)
+		if id == "" {
+			continue
+		}
+		kind := strings.ToLower(strings.TrimSpace(ref.Kind))
+		if kind == "" {
+			kind = string(CI)
+		}
+		if kind != string(CI) {
+			return nil, fmt.Errorf("%w: %s must be a configuration item", ErrInvalid, id)
+		}
+		if id == processID {
+			return nil, fmt.Errorf("%w: a process cannot link to itself", ErrInvalid)
+		}
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		clean = append(clean, ProcessMapRef{Kind: kind, ID: id})
+	}
+	return clean, nil
+}
+
 func validateProcessMapInput(input ProcessMap) (*ProcessMap, error) {
 	clean := &ProcessMap{
 		ProcessID:          strings.TrimSpace(input.ProcessID),
@@ -455,8 +590,20 @@ func validateProcessMapInput(input ProcessMap) (*ProcessMap, error) {
 		OutputDescription:  strings.TrimSpace(input.OutputDescription),
 		TriggerActions:     nil,
 		OutputActions:      nil,
+		Triggers:           nil,
+		Outputs:            nil,
 		Steps:              make([]ProcessMapStep, 0, len(input.Steps)),
 	}
+	triggerRefs, err := cleanMapRefs(input.Triggers, clean.ProcessID)
+	if err != nil {
+		return nil, fmt.Errorf("triggers: %w", err)
+	}
+	clean.Triggers = triggerRefs
+	outputRefs, err := cleanMapRefs(input.Outputs, clean.ProcessID)
+	if err != nil {
+		return nil, fmt.Errorf("outputs: %w", err)
+	}
+	clean.Outputs = outputRefs
 	triggers, err := normalizeActionList(stringSliceAny(input.TriggerActions), ParseTriggerAction)
 	if err != nil {
 		return nil, fmt.Errorf("triggerActions: %w", err)
@@ -541,7 +688,205 @@ func validateProcessMapInput(input ProcessMap) (*ProcessMap, error) {
 		}
 		clean.Steps = append(clean.Steps, cleanStep)
 	}
+	if err := applyStepDependencies(input.Steps, clean.Steps); err != nil {
+		return nil, err
+	}
 	return clean, nil
+}
+
+// applyStepDependencies copies depends-on choices onto the cleaned steps.
+// A payload that omits the field on every step keeps the ordered chain:
+// the first step waits on process start and each later step waits on the one before it.
+func applyStepDependencies(input []ProcessMapStep, clean []ProcessMapStep) error {
+	allOmitted := len(input) > 0
+	for _, step := range input {
+		if step.DependsOn != nil {
+			allOmitted = false
+			break
+		}
+	}
+	if allOmitted {
+		for i := range clean {
+			if i == 0 {
+				clean[i].DependsOn = []ProcessMapDependency{{Kind: processStartDependency}}
+				continue
+			}
+			clean[i].DependsOn = []ProcessMapDependency{{Kind: "step", ID: clean[i-1].ID, Order: i}}
+		}
+		return nil
+	}
+	for i := range clean {
+		deps, err := cleanDependencies(input[i].DependsOn, clean, i)
+		if err != nil {
+			return err
+		}
+		clean[i].DependsOn = deps
+	}
+	return nil
+}
+
+func cleanDependencies(raw []ProcessMapDependency, steps []ProcessMapStep, index int) ([]ProcessMapDependency, error) {
+	position := index + 1
+	seen := map[string]bool{}
+	clean := make([]ProcessMapDependency, 0, len(raw))
+	for _, dep := range raw {
+		kind := strings.ToLower(strings.TrimSpace(dep.Kind))
+		switch kind {
+		case processStartDependency:
+			if seen[processStartDependency] {
+				continue
+			}
+			seen[processStartDependency] = true
+			clean = append(clean, ProcessMapDependency{Kind: processStartDependency})
+		case "step":
+			target, err := resolveDependencyStep(dep, steps, index)
+			if err != nil {
+				return nil, fmt.Errorf("step %d: %w", position, err)
+			}
+			key := target.ID
+			if key == "" {
+				key = fmt.Sprintf("order:%d", target.Order)
+			}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			clean = append(clean, ProcessMapDependency{Kind: "step", ID: target.ID, Order: target.Order})
+		default:
+			return nil, fmt.Errorf("%w: step %d dependency kind must be process-start or step", ErrInvalid, position)
+		}
+	}
+	return clean, nil
+}
+
+func resolveDependencyStep(dep ProcessMapDependency, steps []ProcessMapStep, index int) (ProcessMapStep, error) {
+	id := strings.TrimSpace(dep.ID)
+	if id != "" {
+		for i, step := range steps {
+			if step.ID != id {
+				continue
+			}
+			if i >= index {
+				return ProcessMapStep{}, fmt.Errorf("%w: a step can only depend on an earlier step", ErrInvalid)
+			}
+			return step, nil
+		}
+		return ProcessMapStep{}, fmt.Errorf("%w: dependency %s is not a step in this map", ErrInvalid, id)
+	}
+	if dep.Order < 1 || dep.Order > len(steps) || dep.Order-1 >= index {
+		return ProcessMapStep{}, fmt.Errorf("%w: a step can only depend on an earlier step", ErrInvalid)
+	}
+	return steps[dep.Order-1], nil
+}
+
+func dependenciesForStep(processID string, stepNode *Node, steps []ProcessMapStep) []ProcessMapDependency {
+	if stepNode == nil {
+		return nil
+	}
+	byID := map[string]ProcessMapStep{}
+	for _, step := range steps {
+		byID[step.ID] = step
+	}
+	deps := []ProcessMapDependency{}
+	seen := map[string]bool{}
+	for _, rel := range stepNode.Relationships {
+		if rel.Status != "active" || rel.Kind != DependsOn || rel.FromID != stepNode.ID {
+			continue
+		}
+		if rel.ToID == processID {
+			if seen[processStartDependency] {
+				continue
+			}
+			seen[processStartDependency] = true
+			deps = append(deps, ProcessMapDependency{Kind: processStartDependency, Name: "Process Start"})
+			continue
+		}
+		target, ok := byID[rel.ToID]
+		if !ok || target.ID == stepNode.ID || seen[target.ID] {
+			continue
+		}
+		seen[target.ID] = true
+		deps = append(deps, ProcessMapDependency{Kind: "step", ID: target.ID, Order: target.Order, Name: target.Name})
+	}
+	sort.SliceStable(deps, func(i, j int) bool {
+		if deps[i].Kind == processStartDependency {
+			return true
+		}
+		if deps[j].Kind == processStartDependency {
+			return false
+		}
+		return deps[i].Order < deps[j].Order
+	})
+	return deps
+}
+
+func (s *Service) reconcileStepDependencies(ctx context.Context, processID string, previous []ProcessMapStep, steps []ProcessMapStep) error {
+	managed := map[string]bool{processID: true}
+	for _, step := range previous {
+		if step.ID != "" {
+			managed[step.ID] = true
+		}
+	}
+	for _, step := range steps {
+		if step.ID != "" {
+			managed[step.ID] = true
+		}
+	}
+	current := map[string]bool{}
+	for _, step := range steps {
+		current[step.ID] = true
+		want := map[string]bool{}
+		for _, dep := range step.DependsOn {
+			if dep.Kind == processStartDependency {
+				want[processID] = true
+				continue
+			}
+			if dep.ID != "" {
+				want[dep.ID] = true
+			}
+		}
+		if err := s.reconcileDependsOn(ctx, step.ID, want, managed); err != nil {
+			return err
+		}
+	}
+	for _, step := range previous {
+		if step.ID == "" || current[step.ID] {
+			continue
+		}
+		if err := s.reconcileDependsOn(ctx, step.ID, map[string]bool{}, managed); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) reconcileDependsOn(ctx context.Context, stepID string, want map[string]bool, managed map[string]bool) error {
+	node, err := s.store.GetNode(ctx, CI, stepID, false)
+	if err != nil {
+		return err
+	}
+	have := map[string]bool{}
+	for _, rel := range node.Relationships {
+		if rel.Status != "active" || rel.Kind != DependsOn || rel.FromID != stepID || !managed[rel.ToID] {
+			continue
+		}
+		have[rel.ToID] = true
+		if want[rel.ToID] {
+			continue
+		}
+		if _, err := s.RetireRelationship(ctx, DependsOn, stepID, rel.ToID); err != nil && !errors.Is(err, ErrNotFound) {
+			return err
+		}
+	}
+	for id := range want {
+		if have[id] {
+			continue
+		}
+		if _, err := s.CreateRelationship(ctx, DependsOn, stepID, id, nil); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func stringSliceAny(values []string) any {

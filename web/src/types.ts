@@ -121,9 +121,22 @@ export type OutputAction =
   | "artifact-published"
   | "payment-issued";
 
+export interface ProcessMapRef {
+  kind: "ci";
+  id: string;
+  name?: string;
+}
+
 export interface ProcessMapPerformer {
   kind: ProcessMapPerformerKind;
   id: string;
+  name?: string;
+}
+
+export interface ProcessMapDependency {
+  kind: "process-start" | "step";
+  id?: string;
+  order?: number;
   name?: string;
 }
 
@@ -139,6 +152,7 @@ export interface ProcessMapStep {
   x?: number;
   y?: number;
   performers?: ProcessMapPerformer[];
+  dependsOn?: ProcessMapDependency[];
 }
 
 export interface ProcessMap {
@@ -147,8 +161,10 @@ export interface ProcessMap {
   description?: string;
   triggerActions?: TriggerAction[];
   triggerDescription?: string;
+  triggers?: ProcessMapRef[];
   outputActions?: OutputAction[];
   outputDescription?: string;
+  outputs?: ProcessMapRef[];
   steps: ProcessMapStep[];
 }
 
@@ -372,9 +388,10 @@ export interface GraphNode {
   kind: NodeKind;
   id: string;
   properties?: Properties;
-  status: "active" | "retired";
+  status: "active" | "retired" | "draft";
   retiredAt?: string;
   relationships?: GraphRelationship[];
+  ola?: AgreementClock;
 }
 
 export interface RelationshipDefinition {

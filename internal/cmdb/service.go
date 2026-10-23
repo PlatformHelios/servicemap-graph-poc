@@ -65,6 +65,10 @@ type Store interface {
 	ListRelationships(context.Context, RelationshipKind, ListOptions) ([]Relationship, ListTotals, error)
 	UpdateRelationship(context.Context, RelationshipKind, string, string, map[string]any) (*Relationship, error)
 	RetireRelationship(context.Context, RelationshipKind, string, string) (*Relationship, error)
+	// Draft process-map packages. SetNodeStatus only moves draft to active.
+	SetNodeStatus(context.Context, NodeKind, string, string) error
+	DeleteDraftNode(context.Context, NodeKind, string) error
+	ListDraftPackages(context.Context) ([]DraftPackage, error)
 }
 
 type Service struct {
@@ -143,6 +147,8 @@ func (s *Service) CreateGeneratedNode(ctx context.Context, kind NodeKind, proper
 		if err := s.prepareCaseFromStep(ctx, cleanProperties, cleanCIIDs); err != nil {
 			return nil, err
 		}
+		// openedAt starts the OLA ring. Callers cannot set it.
+		cleanProperties["openedAt"] = time.Now().UTC().Format(time.RFC3339)
 	}
 	if kind == CI && cleanProperties["ciType"] == string(Location) {
 		s.geocodeLocation(ctx, cleanProperties, nil)
@@ -188,7 +194,14 @@ func (s *Service) GetNode(ctx context.Context, kind NodeKind, id string, include
 	if err := validateID(id); err != nil {
 		return nil, err
 	}
-	return s.store.GetNode(ctx, kind, id, includeRetired)
+	node, err := s.store.GetNode(ctx, kind, id, includeRetired)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.attachCaseClock(ctx, node); err != nil {
+		return nil, err
+	}
+	return node, nil
 }
 
 func (s *Service) ListNodes(ctx context.Context, kind NodeKind, options ListOptions) ([]Node, ListTotals, error) {
@@ -209,7 +222,46 @@ func (s *Service) ListNodes(ctx context.Context, kind NodeKind, options ListOpti
 		}
 		options.RequestType = requestType
 	}
-	return s.store.ListNodes(ctx, kind, options)
+	nodes, totals, err := s.store.ListNodes(ctx, kind, options)
+	if err != nil {
+		return nil, ListTotals{}, err
+	}
+	if kind == Case {
+		for index := range nodes {
+			if err := s.attachCaseClock(ctx, &nodes[index]); err != nil {
+				return nil, ListTotals{}, err
+			}
+		}
+	}
+	return nodes, totals, nil
+}
+
+// attachCaseClock fills the case OLA ring from openedAt through now (or
+// retiredAt once the case is resolved). openedAt is stored on the record and
+// kept off the response so the form does not treat it as an editable attribute.
+// A case saved before the clock existed is stamped the first time it is read.
+func (s *Service) attachCaseClock(ctx context.Context, node *Node) error {
+	if node == nil || node.Kind != Case {
+		return nil
+	}
+	if node.Properties == nil {
+		node.Properties = map[string]any{}
+	}
+	opened, _ := node.Properties["openedAt"].(string)
+	if strings.TrimSpace(opened) == "" && node.Status != "retired" {
+		stamp := time.Now().UTC().Format(time.RFC3339)
+		if _, err := s.store.UpdateNode(ctx, Case, node.ID, map[string]any{"openedAt": stamp}); err != nil {
+			return err
+		}
+		node.Properties["openedAt"] = stamp
+	}
+	holidays, err := s.store.ListHolidays(ctx)
+	if err != nil {
+		return err
+	}
+	node.OLA = olaClockForCase(*node, time.Now().UTC(), holidays)
+	delete(node.Properties, "openedAt")
+	return nil
 }
 
 func (s *Service) UpdateNode(ctx context.Context, kind NodeKind, id string, properties map[string]any) (*Node, error) {
@@ -1054,7 +1106,7 @@ func validateProperties(properties map[string]any) (map[string]any, error) {
 			return nil, fmt.Errorf("%w: property name cannot be empty", ErrInvalid)
 		}
 		switch strings.ToLower(key) {
-		case "id", "code", "status", "retiredat", "submittedat", "returncomment", "returnedat":
+		case "id", "code", "status", "retiredat", "submittedat", "returncomment", "returnedat", "openedat":
 			return nil, fmt.Errorf("%w: property %q is managed by the application", ErrInvalid, key)
 		}
 		if value == nil {

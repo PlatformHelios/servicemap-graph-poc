@@ -38,6 +38,7 @@ export function currentApiActor(): string {
 interface NodeCreate {
   properties: Properties;
   ciIds?: string[];
+  status?: "active" | "draft";
 }
 
 interface RelationshipCreate {
@@ -130,6 +131,7 @@ async function requestPage<T>(path: string): Promise<Page<T>> {
 // narrow request lists to one identity's requests or one catalog form.
 export interface ListQuery {
   includeRetired?: boolean;
+  includeDraft?: boolean;
   limit?: number;
   offset?: number;
   q?: string;
@@ -140,6 +142,7 @@ export interface ListQuery {
 function listQueryString(query: ListQuery): string {
   const params = new URLSearchParams();
   if (query.includeRetired) params.set("includeRetired", "true");
+  if (query.includeDraft) params.set("includeDraft", "true");
   if (query.limit) params.set("limit", String(query.limit));
   if (query.offset) params.set("offset", String(query.offset));
   if (query.q?.trim()) params.set("q", query.q.trim());
@@ -154,8 +157,34 @@ export function getMetadata(): Promise<Metadata> {
 }
 
 // Every record of a kind (pickers, the graph map). Lists shown as tables use getNodePage.
-export function getNodes(kind: NodeKind, includeRetired: boolean): Promise<GraphNode[]> {
-  return request<GraphNode[]>(`/api/nodes/${encodeURIComponent(kind)}${listQueryString({ includeRetired })}`);
+export function getNodes(kind: NodeKind, includeRetired: boolean, includeDraft = false): Promise<GraphNode[]> {
+  return request<GraphNode[]>(`/api/nodes/${encodeURIComponent(kind)}${listQueryString({ includeRetired, includeDraft })}`);
+}
+
+export interface DraftObject {
+  kind: NodeKind;
+  id: string;
+  name?: string;
+  ciType?: string;
+  status: string;
+}
+
+export interface DraftPackage {
+  processId?: string;
+  name: string;
+  objects: DraftObject[];
+}
+
+export function getDraftPackages(): Promise<DraftPackage[]> {
+  return request<DraftPackage[]>("/api/draft-packages");
+}
+
+export function publishDrafts(objects: { kind: NodeKind; id: string }[]): Promise<void> {
+  return request<void>("/api/drafts/publish", { method: "POST", body: JSON.stringify({ objects }) });
+}
+
+export function deleteDraft(kind: NodeKind, id: string): Promise<void> {
+  return request<void>(`/api/drafts/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
 export function getNodePage(kind: NodeKind, query: ListQuery): Promise<Page<GraphNode>> {
