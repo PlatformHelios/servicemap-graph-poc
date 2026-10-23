@@ -13,7 +13,7 @@ type sampleInput struct {
 	Backup      bool    `json:"backup,omitempty" default:"true"`
 	Application string  `json:"application" portal:"cmdb:application"`
 	Ignored     string  `json:"-"`
-	internal    string
+	internal    string //nolint:unused // unexported fields are left out of the schema
 }
 
 func SampleWorkflow() {}
