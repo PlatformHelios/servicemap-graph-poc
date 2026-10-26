@@ -136,6 +136,10 @@ jobs:
           PROJECT: ${{ matrix.image }}
           VERSION: ${{ steps.meta.outputs.version }}
         run: |
+          case "$DT_URL" in
+            https://*) ;;
+            *) echo "::error::DEPENDENCYTRACK_URL must start with https:// (got '$DT_URL')"; exit 1 ;;
+          esac
           # Not following redirects: curl would resend the POST as a GET. A
           # redirect here means the URL is wrong (http:// instead of https://,
           # or a Cloudflare redirect rule), so fail and show where it points.
