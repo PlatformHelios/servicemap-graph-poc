@@ -102,6 +102,25 @@ The [Container images](.github/workflows/images.yml) workflow builds both images
 podman pull ghcr.io/platformhelios/servicemap-api:latest
 ```
 
+#### SBOMs and vulnerability scanning
+
+The same workflow generates a CycloneDX SBOM for each image with [syft](https://github.com/anchore/syft) and scans it with [grype](https://github.com/anchore/grype):
+
+- **SBOM:** uploaded as a run artifact named `servicemap-api.cdx.json` or `servicemap-web.cdx.json` (download it from the run's **Artifacts** section).
+- **Vulnerabilities:** grype's findings appear in the run summary. The scan only reports for now and does not fail the build, because a failed build would also stop the AKS deploy. To make it gate, set `fail-build: true` (and optionally `severity-cutoff`) on the `Vulnerability scan` step.
+- **Dependency-Track:** runs that push images also upload the SBOM to Dependency-Track, as project `servicemap-api` or `servicemap-web` with the image tag as the version (`main`, `1.2.3`, ...). Projects are created on the first upload. Pull requests never upload.
+
+Dependency-Track sits behind Cloudflare Access, so the upload sends a Cloudflare Access service token along with the Dependency-Track API key. The upload step is skipped until `DEPENDENCYTRACK_URL` is set. Configure these under **Settings > Secrets and variables > Actions**:
+
+| Name | Kind | Value |
+| --- | --- | --- |
+| `DEPENDENCYTRACK_URL` | variable | Dependency-Track API base URL, for example `https://dtrack-api.example.com` |
+| `DEPENDENCYTRACK_API_KEY` | secret | API key of a Dependency-Track team with `BOM_UPLOAD` and `PROJECT_CREATION_UPLOAD` |
+| `CF_ACCESS_CLIENT_ID` | secret | Client ID of the Cloudflare Access service token |
+| `CF_ACCESS_CLIENT_SECRET` | secret | Client secret of the same token |
+
+The Cloudflare Access application in front of Dependency-Track needs a policy with action **Service Auth** that includes the service token; with **Allow**, requests are redirected to the login page. If an upload fails, an HTML login page or redirect in the step log means Cloudflare rejected the token, and a 401 or 403 from Dependency-Track means the API key or its team's permissions are wrong.
+
 ### Develop on the host
 
 Run the prerequisites in containers and the Go API and Vite dev server on the host. If the `api` container is running, stop it first with `podman compose stop api web`, since both use port 8080.
