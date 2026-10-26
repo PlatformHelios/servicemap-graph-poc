@@ -11,10 +11,11 @@
 # scans that SBOM with grype and writes the findings to the run summary.
 # Runs that push also upload the SBOM to Dependency-Track as project
 # <image>, version <tag> (main, 1.2.3, ...), once these are set:
-#   variable  DEPENDENCYTRACK_HOSTNAME  e.g. dtrack.example.com (no scheme)
-#   variable  DEPENDENCYTRACK_PORT      optional, default 443 (https)
-#   secret    DEPENDENCYTRACK_API_KEY   key of a team with BOM_UPLOAD and
-#                                       PROJECT_CREATION_UPLOAD
+#   variable  DEPENDENCYTRACK_URL      API base URL, e.g. https://dtrack-api.example.com
+#   secret    DEPENDENCYTRACK_API_KEY  key of a team with BOM_UPLOAD and
+#                                      PROJECT_CREATION_UPLOAD
+#   secret    CF_ACCESS_CLIENT_ID      Cloudflare Access service token in
+#   secret    CF_ACCESS_CLIENT_SECRET  front of Dependency-Track
 name: Container images
 
 on:
@@ -123,14 +124,24 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # Plain curl rather than DependencyTrack/gh-upload-sbom, which cannot
+      # send the Cloudflare Access headers.
       - name: Upload SBOM to Dependency-Track
-        if: env.PUSH == 'true' && vars.DEPENDENCYTRACK_HOSTNAME != ''
-        uses: DependencyTrack/gh-upload-sbom@v4
-        with:
-          server-hostname: ${{ vars.DEPENDENCYTRACK_HOSTNAME }}
-          port: ${{ vars.DEPENDENCYTRACK_PORT || '443' }}
-          api-key: ${{ secrets.DEPENDENCYTRACK_API_KEY }}
-          project-name: ${{ matrix.image }}
-          project-version: ${{ steps.meta.outputs.version }}
-          auto-create: true
-          bom-filename: ${{ matrix.image }}.cdx.json
+        if: env.PUSH == 'true' && vars.DEPENDENCYTRACK_URL != ''
+        env:
+          DT_URL: ${{ vars.DEPENDENCYTRACK_URL }}
+          DT_API_KEY: ${{ secrets.DEPENDENCYTRACK_API_KEY }}
+          CF_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          PROJECT: ${{ matrix.image }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          curl --fail-with-body --silent --show-error --retry 3 \
+            -H "X-Api-Key: $DT_API_KEY" \
+            -H "CF-Access-Client-Id: $CF_ID" \
+            -H "CF-Access-Client-Secret: $CF_SECRET" \
+            -F "projectName=$PROJECT" \
+            -F "projectVersion=$VERSION" \
+            -F "autoCreate=true" \
+            -F "bom=@$PROJECT.cdx.json" \
+            "${DT_URL%/}/api/v1/bom"
