@@ -119,7 +119,21 @@ Dependency-Track sits behind Cloudflare Access, so the upload sends a Cloudflare
 | `CF_ACCESS_CLIENT_ID` | secret | Client ID of the Cloudflare Access service token |
 | `CF_ACCESS_CLIENT_SECRET` | secret | Client secret of the same token |
 
-The Cloudflare Access application in front of Dependency-Track needs a policy with action **Service Auth** that includes the service token; with **Allow**, requests are redirected to the login page. If an upload fails, an HTML login page or redirect in the step log means Cloudflare rejected the token, and a 401 or 403 from Dependency-Track means the API key or its team's permissions are wrong.
+The Cloudflare Access application in front of Dependency-Track needs a policy with action **Service Auth** that includes the service token; with **Allow**, requests are redirected to the login page. If an upload fails, a 301 means `DEPENDENCYTRACK_URL` is wrong (usually `http://` instead of `https://`, or a Cloudflare redirect rule; the error shows the redirect target), a 302 to `cloudflareaccess.com` or an HTML login page means Cloudflare rejected the token, and a 401 or 403 from Dependency-Track means the API key or its team's permissions are wrong.
+
+**Testing from a pull request.** A pull request runs syft and grype, but never pushes images or uploads to Dependency-Track:
+
+1. Open the pull request, then open the **Container images** run from its checks. Each `Build` job should show its grype findings in the run summary and have an SBOM under **Artifacts**.
+2. To test the upload too, run the workflow manually on the pull request's branch, either from **Actions > Container images > Run workflow** (choose the branch) or with:
+
+   ```powershell
+   gh workflow run images.yml --ref <branch>
+   gh run watch
+   ```
+
+   This pushes the branch's images to GHCR (tagged with the branch name and `sha-<short>`; it does not deploy to AKS) and uploads their SBOMs to Dependency-Track with the branch name as the version, for example `feature-sbom-generation`.
+3. Check that the `Upload SBOM to Dependency-Track` step printed a JSON response containing a `token`, and that `servicemap-api` and `servicemap-web` appear in Dependency-Track with that version after a minute or so.
+4. Once merged, delete the branch's version in Dependency-Track so it stops being monitored. Pushes to `main` upload the `main` version from then on.
 
 ### Develop on the host
 
