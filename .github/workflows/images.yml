@@ -9,6 +9,12 @@
 # Every run also generates a CycloneDX SBOM for each image with syft (the
 # format Dependency-Track ingests) and uploads it as a workflow artifact, then
 # scans that SBOM with grype and writes the findings to the run summary.
+# Runs that push also upload the SBOM to Dependency-Track as project
+# <image>, version <tag> (main, 1.2.3, ...), once these are set:
+#   variable  DEPENDENCYTRACK_HOSTNAME  e.g. dtrack.example.com (no scheme)
+#   variable  DEPENDENCYTRACK_PORT      optional, default 443 (https)
+#   secret    DEPENDENCYTRACK_API_KEY   key of a team with BOM_UPLOAD and
+#                                       PROJECT_CREATION_UPLOAD
 name: Container images
 
 on:
@@ -116,3 +122,15 @@ jobs:
             cat "$IMAGE-grype.txt"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload SBOM to Dependency-Track
+        if: env.PUSH == 'true' && vars.DEPENDENCYTRACK_HOSTNAME != ''
+        uses: DependencyTrack/gh-upload-sbom@v4
+        with:
+          server-hostname: ${{ vars.DEPENDENCYTRACK_HOSTNAME }}
+          port: ${{ vars.DEPENDENCYTRACK_PORT || '443' }}
+          api-key: ${{ secrets.DEPENDENCYTRACK_API_KEY }}
+          project-name: ${{ matrix.image }}
+          project-version: ${{ steps.meta.outputs.version }}
+          auto-create: true
+          bom-filename: ${{ matrix.image }}.cdx.json
