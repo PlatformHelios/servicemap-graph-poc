@@ -140,6 +140,14 @@ jobs:
             https://*) ;;
             *) echo "::error::DEPENDENCYTRACK_URL must start with https:// (got '$DT_URL')"; exit 1 ;;
           esac
+          # Secrets set only on an environment (e.g. "dev") are empty here,
+          # because this job has no environment.
+          for name in DT_API_KEY CF_ID CF_SECRET; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is empty: set the DEPENDENCYTRACK_API_KEY and CF_ACCESS_CLIENT_* secrets at repository level"
+              exit 1
+            fi
+          done
           # Not following redirects: curl would resend the POST as a GET. A
           # redirect here means the URL is wrong (http:// instead of https://,
           # or a Cloudflare redirect rule), so fail and show where it points.
@@ -155,7 +163,20 @@ jobs:
             "${DT_URL%/}/api/v1/bom")
           cat response.txt; echo
           if [ "$status" != 200 ]; then
-            location=$(grep -i '^location:' headers.txt | tr -d '\r' || true)
-            echo "::error::Dependency-Track upload returned HTTP $status${location:+ ($location)}"
+            location=$(grep -i '^location:' headers.txt | tr -d '\r' | cut -d' ' -f2 || true)
+            case "$location" in
+              *.cloudflareaccess.com/*)
+                # The login redirect's meta JWT says whether Access recognised
+                # the service token (true: token valid, but no Service Auth
+                # policy on this application lets it in).
+                payload=$(sed -n 's/.*[?&]meta=[^.]*\.\([^.&]*\).*/\1/p' <<<"$location" | tr '_-' '/+')
+                while [ $(( ${#payload} % 4 )) -ne 0 ]; do payload="$payload="; done
+                token_status=$(base64 -d <<<"$payload" 2>/dev/null | grep -o '"service_token_status":[a-z]*' || true)
+                echo "::error::Cloudflare Access redirected to its login page (HTTP $status, ${token_status:-service_token_status unknown})"
+                ;;
+              *)
+                echo "::error::Dependency-Track upload returned HTTP $status${location:+ (Location: $location)}"
+                ;;
+            esac
             exit 1
           fi
