@@ -136,7 +136,11 @@ jobs:
           PROJECT: ${{ matrix.image }}
           VERSION: ${{ steps.meta.outputs.version }}
         run: |
-          curl --fail-with-body --silent --show-error --retry 3 \
+          # Not following redirects: curl would resend the POST as a GET. A
+          # redirect here means the URL is wrong (http:// instead of https://,
+          # or a Cloudflare redirect rule), so fail and show where it points.
+          status=$(curl --silent --show-error --retry 3 \
+            -o response.txt -D headers.txt -w '%{http_code}' \
             -H "X-Api-Key: $DT_API_KEY" \
             -H "CF-Access-Client-Id: $CF_ID" \
             -H "CF-Access-Client-Secret: $CF_SECRET" \
@@ -144,4 +148,10 @@ jobs:
             -F "projectVersion=$VERSION" \
             -F "autoCreate=true" \
             -F "bom=@$PROJECT.cdx.json" \
-            "${DT_URL%/}/api/v1/bom"
+            "${DT_URL%/}/api/v1/bom")
+          cat response.txt; echo
+          if [ "$status" != 200 ]; then
+            location=$(grep -i '^location:' headers.txt | tr -d '\r' || true)
+            echo "::error::Dependency-Track upload returned HTTP $status${location:+ ($location)}"
+            exit 1
+          fi
