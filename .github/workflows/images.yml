@@ -7,7 +7,8 @@
 #   manual run     push tags for the selected branch
 #
 # Every run also generates a CycloneDX SBOM for each image with syft (the
-# format Dependency-Track ingests) and uploads it as a workflow artifact.
+# format Dependency-Track ingests) and uploads it as a workflow artifact, then
+# scans that SBOM with grype and writes the findings to the run summary.
 name: Container images
 
 on:
@@ -93,3 +94,25 @@ jobs:
           image: ${{ steps.name.outputs.image }}:${{ steps.meta.outputs.version }}
           format: cyclonedx-json
           artifact-name: ${{ matrix.image }}.cdx.json
+          output-file: ${{ matrix.image }}.cdx.json
+
+      # Report only for now: a failing build would also block the AKS deploy.
+      # Set fail-build: true once the existing findings have been triaged.
+      - name: Vulnerability scan
+        uses: anchore/scan-action@v7
+        with:
+          sbom: ${{ matrix.image }}.cdx.json
+          fail-build: false
+          output-format: table
+          output-file: ${{ matrix.image }}-grype.txt
+
+      - name: Vulnerability summary
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          {
+            echo "### grype: $IMAGE"
+            echo '```'
+            cat "$IMAGE-grype.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
