@@ -118,6 +118,7 @@ func NewHandlerWithLogger(service *cmdb.Service, logger *slog.Logger) http.Handl
 	mux.HandleFunc("GET /api/process-maps/{processId}", api.getProcessMap)
 	mux.HandleFunc("PUT /api/process-maps/{processId}", api.saveProcessMap)
 	mux.HandleFunc("GET /api/process-maps/{processId}/mermaid", api.exportProcessMapMermaid)
+	mux.HandleFunc("GET /api/process-maps/{processId}/markdown", api.exportProcessMapMarkdown)
 	mux.HandleFunc("GET /api/draft-packages", api.listDraftPackages)
 	mux.HandleFunc("POST /api/drafts/publish", api.publishDrafts)
 	mux.HandleFunc("DELETE /api/drafts/{kind}/{id}", api.deleteDraft)
@@ -261,6 +262,16 @@ func (h *handler) getProcessMap(w http.ResponseWriter, r *http.Request) {
 
 // exportProcessMapMermaid serves the saved map as a Mermaid flowchart file.
 func (h *handler) exportProcessMapMermaid(w http.ResponseWriter, r *http.Request) {
+	h.exportProcessMap(w, r, "text/vnd.mermaid", ".mmd", (*cmdb.ProcessMap).Mermaid)
+}
+
+// exportProcessMapMarkdown serves the saved map as a Markdown document with
+// the Mermaid flowchart embedded.
+func (h *handler) exportProcessMapMarkdown(w http.ResponseWriter, r *http.Request) {
+	h.exportProcessMap(w, r, "text/markdown", ".md", (*cmdb.ProcessMap).Markdown)
+}
+
+func (h *handler) exportProcessMap(w http.ResponseWriter, r *http.Request, contentType, extension string, render func(*cmdb.ProcessMap) string) {
 	if _, ok := h.requireAnyCapability(w, r, cmdb.CapProcessMapRead, cmdb.CapConfigItemRead); !ok {
 		return
 	}
@@ -270,16 +281,16 @@ func (h *handler) exportProcessMapMermaid(w http.ResponseWriter, r *http.Request
 		writeServiceError(w, err)
 		return
 	}
-	w.Header().Set("Content-Type", "text/vnd.mermaid; charset=utf-8")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", mermaidFilename(processID)))
+	w.Header().Set("Content-Type", contentType+"; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", exportFilename(processID)+extension))
 	w.WriteHeader(http.StatusOK)
-	if _, err := io.WriteString(w, processMap.Mermaid()); err != nil {
+	if _, err := io.WriteString(w, render(processMap)); err != nil {
 		slog.Default().Error("write HTTP response failed", "error", err)
 	}
 }
 
-// mermaidFilename keeps only filename-safe characters from the process ID.
-func mermaidFilename(processID string) string {
+// exportFilename keeps only filename-safe characters from the process ID.
+func exportFilename(processID string) string {
 	safe := strings.Map(func(r rune) rune {
 		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' {
 			return r
@@ -289,7 +300,7 @@ func mermaidFilename(processID string) string {
 	if safe == "" {
 		safe = "process-map"
 	}
-	return safe + ".mmd"
+	return safe
 }
 
 func (h *handler) saveProcessMap(w http.ResponseWriter, r *http.Request) {

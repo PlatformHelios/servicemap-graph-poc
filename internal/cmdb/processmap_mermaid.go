@@ -32,12 +32,8 @@ func (m *ProcessMap) Mermaid() string {
 	}
 	fmt.Fprintf(&b, "    start([\"%s\"])\n", mermaidLabel("Start", startDetail))
 
-	nodeIDs := make(map[string]string, len(m.Steps))
 	for i, step := range m.Steps {
 		nodeID := fmt.Sprintf("step%d", i+1)
-		if step.ID != "" {
-			nodeIDs[step.ID] = nodeID
-		}
 		name := step.Name
 		if name == "" {
 			name = fmt.Sprintf("Step %d", i+1)
@@ -54,7 +50,7 @@ func (m *ProcessMap) Mermaid() string {
 		b.WriteString("    start --> finish\n")
 		return b.String()
 	}
-	deps := mermaidDependencies(m.Steps, nodeIDs)
+	deps := mermaidDependencies(m.Steps, stepNodeIDs(m.Steps))
 	waitedOn := map[string]bool{}
 	for i, stepDeps := range deps {
 		target := fmt.Sprintf("step%d", i+1)
@@ -197,6 +193,7 @@ func mermaidLabel(title, detail string) string {
 var mermaidEscaper = strings.NewReplacer(
 	"#", "#35;",
 	`"`, "#quot;",
+	"`", "#96;",
 	"<", "#lt;",
 	">", "#gt;",
 	"\r\n", "<br/>",

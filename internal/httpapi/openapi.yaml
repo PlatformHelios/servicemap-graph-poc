@@ -416,6 +416,36 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/RequestFailed"
+  /api/process-maps/{processId}/markdown:
+    parameters:
+      - name: processId
+        in: path
+        required: true
+        description: Identifier of the Process CI to export.
+        schema:
+          type: string
+    get:
+      tags: [ProcessMaps]
+      summary: Export a business process map as a Markdown document
+      description: >-
+        Returns the saved process map as a Markdown document (.md download):
+        the process name and description, the Mermaid flowchart in a fenced
+        mermaid block, then Start, Steps (a table of execution, performers,
+        dependencies, case creation, and OLA), and Outputs sections.
+      operationId: exportProcessMapMarkdown
+      responses:
+        "200":
+          description: Markdown document.
+          content:
+            text/markdown:
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/RequestFailed"
   /api/workflows:
     get:
       tags: [Workflows]
