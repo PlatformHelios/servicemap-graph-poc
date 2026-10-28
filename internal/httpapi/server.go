@@ -117,6 +117,7 @@ func NewHandlerWithLogger(service *cmdb.Service, logger *slog.Logger) http.Handl
 	mux.HandleFunc("GET /api/capabilities", api.capabilities)
 	mux.HandleFunc("GET /api/process-maps/{processId}", api.getProcessMap)
 	mux.HandleFunc("PUT /api/process-maps/{processId}", api.saveProcessMap)
+	mux.HandleFunc("GET /api/process-maps/{processId}/mermaid", api.exportProcessMapMermaid)
 	mux.HandleFunc("GET /api/draft-packages", api.listDraftPackages)
 	mux.HandleFunc("POST /api/drafts/publish", api.publishDrafts)
 	mux.HandleFunc("DELETE /api/drafts/{kind}/{id}", api.deleteDraft)
@@ -256,6 +257,39 @@ func (h *handler) getProcessMap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, processMap)
+}
+
+// exportProcessMapMermaid serves the saved map as a Mermaid flowchart file.
+func (h *handler) exportProcessMapMermaid(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireAnyCapability(w, r, cmdb.CapProcessMapRead, cmdb.CapConfigItemRead); !ok {
+		return
+	}
+	processID := r.PathValue("processId")
+	processMap, err := h.service.GetProcessMap(r.Context(), processID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/vnd.mermaid; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", mermaidFilename(processID)))
+	w.WriteHeader(http.StatusOK)
+	if _, err := io.WriteString(w, processMap.Mermaid()); err != nil {
+		slog.Default().Error("write HTTP response failed", "error", err)
+	}
+}
+
+// mermaidFilename keeps only filename-safe characters from the process ID.
+func mermaidFilename(processID string) string {
+	safe := strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' {
+			return r
+		}
+		return -1
+	}, processID)
+	if safe == "" {
+		safe = "process-map"
+	}
+	return safe + ".mmd"
 }
 
 func (h *handler) saveProcessMap(w http.ResponseWriter, r *http.Request) {
