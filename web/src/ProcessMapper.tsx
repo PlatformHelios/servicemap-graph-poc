@@ -15,7 +15,7 @@ import {
   type OnNodeDrag,
 } from "@xyflow/react";
 import { ArrowDown, ArrowUp, Download, Plus, Save, Search, Ticket, Trash2, X } from "lucide-react";
-import { createNode, getNode, getNodePage, getNodes, getProcessMap, getProcessMapMermaid, nodeDisplayName, saveProcessMap } from "./api";
+import { createNode, getNode, getNodePage, getNodes, getProcessMap, getProcessMapMarkdown, nodeDisplayName, saveProcessMap } from "./api";
 import RecordPicker, { pickerSubtitle, titleCase } from "./RecordPicker";
 import type {
   ExecutionModel,
@@ -795,17 +795,17 @@ export default function ProcessMapper({
     }
   }
 
-  // Downloads the saved map (not unsaved edits) as a Mermaid .mmd file.
-  async function exportMermaid() {
+  // Downloads the saved map (not unsaved edits) as a Markdown document.
+  async function exportMarkdown() {
     if (!processId) return;
     setExporting(true);
     setError("");
     try {
-      const source = await getProcessMapMermaid(processId);
-      const url = URL.createObjectURL(new Blob([source], { type: "text/vnd.mermaid" }));
+      const source = await getProcessMapMarkdown(processId);
+      const url = URL.createObjectURL(new Blob([source], { type: "text/markdown" }));
       const link = document.createElement("a");
       link.href = url;
-      link.download = `${processId.replace(/[^A-Za-z0-9_-]/g, "") || "process-map"}.mmd`;
+      link.download = `${processId.replace(/[^A-Za-z0-9_-]/g, "") || "process-map"}.md`;
       link.click();
       URL.revokeObjectURL(url);
     } catch (exportError: unknown) {
@@ -867,11 +867,11 @@ export default function ProcessMapper({
             <button
               className="button button-quiet icon-button"
               type="button"
-              title="Download the saved map as a Mermaid flowchart"
+              title="Download the saved map as a Markdown document with a Mermaid diagram"
               disabled={exporting || loading}
-              onClick={() => void exportMermaid()}
+              onClick={() => void exportMarkdown()}
             >
-              <Download size={14} />{exporting ? "Exporting…" : "Export Mermaid"}
+              <Download size={14} />{exporting ? "Exporting…" : "Export Markdown"}
             </button>
           )}
         </div>
