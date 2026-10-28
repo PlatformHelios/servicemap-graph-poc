@@ -277,6 +277,21 @@ export function getProcessMap(processId: string): Promise<ProcessMap> {
   return request<ProcessMap>(`/api/process-maps/${encodeURIComponent(processId)}`);
 }
 
+// The saved map as Mermaid flowchart source, for the .mmd export.
+export async function getProcessMapMermaid(processId: string): Promise<string> {
+  const response = await fetch(`/api/process-maps/${encodeURIComponent(processId)}/mermaid`, {
+    headers: { "X-Actor-Id": actorId },
+  });
+  if (!response.ok) {
+    const result: unknown = await response.json().catch(() => ({}));
+    const message = typeof result === "object" && result !== null && "error" in result
+      ? String(result.error)
+      : `Request failed (${response.status})`;
+    throw new Error(message);
+  }
+  return response.text();
+}
+
 export function saveProcessMap(processId: string, processMap: ProcessMap): Promise<ProcessMap> {
   return request<ProcessMap>(`/api/process-maps/${encodeURIComponent(processId)}`, {
     method: "PUT",

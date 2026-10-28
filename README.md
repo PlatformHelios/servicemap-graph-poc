@@ -252,6 +252,7 @@ GET                 /api/access-anomalies
 POST                /api/access-anomalies/refresh
 GET                 /api/capabilities
 GET, PUT            /api/process-maps/{processId}
+GET                 /api/process-maps/{processId}/mermaid
 GET                 /api/meta
 GET                 /api/openapi.yaml
 GET                 /api/docs
@@ -460,6 +461,7 @@ Every relationship is stored once, in its forward direction, and has a paired in
 - Manual steps are performed by people, groups, or applications. Automated steps are performed only by Automation CIs and cannot allow case creation.
 - **Allow case creation** lets a case be raised for that step. The case copies the step OLA and is assigned to the step's identity and group performers.
 - `GET` / `PUT /api/process-maps/{processId}` load and save the map. Open it from CMDB, a Process CI, or Graph Map.
+- **Export Mermaid** downloads the saved map as a Mermaid flowchart (`<processId>.mmd`) with the same shape as the canvas: Start, steps wired by `depends-on`, and Outputs. Automated steps are drawn as subroutines. Unsaved edits are not included. The same file is served by `GET /api/process-maps/{processId}/mermaid`.
 
 ## Catalog requests and workflows
 

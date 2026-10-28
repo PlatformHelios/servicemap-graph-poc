@@ -14,8 +14,8 @@ import {
   type NodeProps,
   type OnNodeDrag,
 } from "@xyflow/react";
-import { ArrowDown, ArrowUp, Plus, Save, Search, Ticket, Trash2, X } from "lucide-react";
-import { createNode, getNode, getNodePage, getNodes, getProcessMap, nodeDisplayName, saveProcessMap } from "./api";
+import { ArrowDown, ArrowUp, Download, Plus, Save, Search, Ticket, Trash2, X } from "lucide-react";
+import { createNode, getNode, getNodePage, getNodes, getProcessMap, getProcessMapMermaid, nodeDisplayName, saveProcessMap } from "./api";
 import RecordPicker, { pickerSubtitle, titleCase } from "./RecordPicker";
 import type {
   ExecutionModel,
@@ -370,6 +370,7 @@ export default function ProcessMapper({
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [raising, setRaising] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [error, setError] = useState("");
   const [newProcessName, setNewProcessName] = useState("");
   const [flowNodes, setFlowNodes] = useState<Node<ProcessNodeData>[]>([]);
@@ -794,6 +795,26 @@ export default function ProcessMapper({
     }
   }
 
+  // Downloads the saved map (not unsaved edits) as a Mermaid .mmd file.
+  async function exportMermaid() {
+    if (!processId) return;
+    setExporting(true);
+    setError("");
+    try {
+      const source = await getProcessMapMermaid(processId);
+      const url = URL.createObjectURL(new Blob([source], { type: "text/vnd.mermaid" }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${processId.replace(/[^A-Za-z0-9_-]/g, "") || "process-map"}.mmd`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (exportError: unknown) {
+      setError(exportError instanceof Error ? exportError.message : "Could not export this map.");
+    } finally {
+      setExporting(false);
+    }
+  }
+
   const coach = guidance[stage];
 
   return (
@@ -840,6 +861,17 @@ export default function ProcessMapper({
               onClick={() => void persist()}
             >
               <Save size={14} />{saving ? "Saving…" : processId ? "Save map" : "Create & save map"}
+            </button>
+          )}
+          {processId && (
+            <button
+              className="button button-quiet icon-button"
+              type="button"
+              title="Download the saved map as a Mermaid flowchart"
+              disabled={exporting || loading}
+              onClick={() => void exportMermaid()}
+            >
+              <Download size={14} />{exporting ? "Exporting…" : "Export Mermaid"}
             </button>
           )}
         </div>
